@@ -81,9 +81,13 @@ pub trait KernelObject<K: Kernel>: Any + Send + Sync {
     /// Raise the USER signal on the peer's object.
     ///
     /// For channel objects, this raises USER on the paired peer (initiator ↔ handler).
+    ///
+    /// # Errors
+    /// - `InvalidArgument` if the object does not support peer signaling
+    /// - `FailedPrecondition` if there is no active peer (e.g., no transaction)
     #[allow(unused_variables)]
     fn raise_peer_user_signal(&self, kernel: K) -> Result<()> {
-        Err(Error::Unimplemented)
+        Err(Error::InvalidArgument)
     }
 }
 
@@ -247,6 +251,9 @@ impl<K: Kernel> ObjectBase<K> {
         result
     }
 
+    /// Set signals on this object, replacing the current signal state.
+    ///
+    /// This replaces all signals. Use `raise()` to OR signals instead.
     pub fn signal(&self, kernel: K, active_signals: Signals) {
         let mut state = self.state.lock(kernel);
         state.active_signals = active_signals;
@@ -257,6 +264,33 @@ impl<K: Kernel> ObjectBase<K> {
                 // object has exclusive access to the waiter.  The below
                 // operation is done with the object's spinlock held.
                 unsafe { waiter.wait_result.set(Ok(active_signals)) };
+                waiter.signaler.signal();
+            }
+            Ok(())
+        });
+    }
+
+    /// Raise additional signals on this object (OR with existing signals).
+    ///
+    /// Unlike `signal()`, this preserves existing signals and adds new ones.
+    /// This is the correct method for raising USER or other notification signals
+    /// without disturbing READABLE/WRITEABLE state.
+    ///
+    /// # Memory Ordering
+    /// The spinlock provides acquire/release semantics, ensuring:
+    /// - All writes before `raise()` are visible to the peer after they
+    ///   observe the signal via `object_wait()`
+    /// - Cross-core visibility is guaranteed on ARM Cortex-M and RISC-V
+    pub fn raise(&self, kernel: K, signals_to_raise: Signals) {
+        let mut state = self.state.lock(kernel);
+        state.active_signals |= signals_to_raise;
+
+        let _ = state.waiters.for_each(|waiter| -> Result<()> {
+            if waiter.signal_mask.intersects(signals_to_raise) {
+                // Safety: While a waiter is in an object's `waiters` list, that
+                // object has exclusive access to the waiter.  The below
+                // operation is done with the object's spinlock held.
+                unsafe { waiter.wait_result.set(Ok(state.active_signals)) };
                 waiter.signaler.signal();
             }
             Ok(())
