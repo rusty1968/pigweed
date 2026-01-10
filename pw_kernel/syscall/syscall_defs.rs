@@ -249,6 +249,7 @@ pub enum SysCallId {
     ChannelRead = 0x0002,
     ChannelRespond = 0x0003,
     InterruptAck = 0x0004,
+    RaisePeerUserSignal = 0x0005,
 
     // System calls prefixed with 0xF000 are reserved development/debugging use.
     DebugPutc = 0xf000,
@@ -542,6 +543,9 @@ pub trait SysCallInterface {
     ) -> Result<()>;
 
     fn interrupt_ack(object_handle: u32, signal_mask: Signals) -> Result<()>;
+
+    /// Raise the USER signal on the peer's channel object.
+    fn raise_peer_user_signal(object_handle: u32) -> Result<()>;
 
     fn debug_putc(a: u32) -> Result<u32>;
     // TODO: Consider adding an feature flagged PowerManager object and move

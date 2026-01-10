@@ -63,6 +63,15 @@ pub fn interrupt_ack(object_handle: u32, signal_mask: Signals) -> Result<()> {
     SysCall::interrupt_ack(object_handle, signal_mask)
 }
 
+/// Raise the USER signal on the peer's channel object.
+///
+/// For initiators, this signals the handler.
+/// For handlers, this signals the initiator (requires active transaction).
+#[inline(always)]
+pub fn raise_peer_user_signal(object_handle: u32) -> Result<()> {
+    SysCall::raise_peer_user_signal(object_handle)
+}
+
 #[inline(always)]
 pub fn debug_putc(c: char) -> Result<u32> {
     SysCall::debug_putc(c.into())

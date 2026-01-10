@@ -51,6 +51,7 @@ syscall_veneer!(ChannelRead, channel_read(
 ));
 syscall_veneer!(ChannelRespond, channel_respond(object_handle: u32, buffer: *const u8, buffer_len: usize));
 syscall_veneer!(InterruptAck, interrupt_ack(object_handle: u32, signal_mask: Signals));
+syscall_veneer!(RaisePeerUserSignal, raise_peer_user_signal(object_handle: u32));
 syscall_veneer!(DebugPutc, putc(a: u32));
 syscall_veneer!(DebugShutdown, shutdown(a: u32));
 syscall_veneer!(DebugLog, log(buffer: *const u8, buffer_len: usize));
@@ -97,6 +98,11 @@ impl SysCallInterface for SysCall {
     #[inline(always)]
     fn interrupt_ack(handle: u32, signal_mask: Signals) -> Result<()> {
         SysCallReturnValue(unsafe { interrupt_ack(handle, signal_mask) }).to_result_unit()
+    }
+
+    #[inline(always)]
+    fn raise_peer_user_signal(handle: u32) -> Result<()> {
+        SysCallReturnValue(unsafe { raise_peer_user_signal(handle) }).to_result_unit()
     }
 
     #[inline(always)]

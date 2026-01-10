@@ -77,6 +77,14 @@ pub trait KernelObject<K: Kernel>: Any + Send + Sync {
     fn interrupt_ack(&self, kernel: K, signal_mask: Signals) -> Result<()> {
         Err(Error::Unimplemented)
     }
+
+    /// Raise the USER signal on the peer's object.
+    ///
+    /// For channel objects, this raises USER on the paired peer (initiator ↔ handler).
+    #[allow(unused_variables)]
+    fn raise_peer_user_signal(&self, kernel: K) -> Result<()> {
+        Err(Error::Unimplemented)
+    }
 }
 
 list::define_adapter!(pub ObjectWaiterListAdapter<K: Kernel> => ObjectWaiter<K>::link);

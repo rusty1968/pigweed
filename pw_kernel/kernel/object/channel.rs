@@ -79,6 +79,18 @@ impl<K: Kernel> KernelObject<K> for ChannelHandlerObject<K> {
         transaction.initiator.base.signal(kernel, Signals::READABLE);
         Ok(())
     }
+
+    fn raise_peer_user_signal(&self, kernel: K) -> Result<()> {
+        // Handler raises USER signal on the initiator
+        let active_transaction = self.active_transaction.lock();
+        let Some(ref transaction) = *active_transaction else {
+            // No active transaction means we don't know who the initiator is.
+            // Still succeed - this is a fire-and-forget notification.
+            return Err(Error::FailedPrecondition);
+        };
+        transaction.initiator.base.signal(kernel, Signals::USER);
+        Ok(())
+    }
 }
 
 pub struct ChannelInitiatorObject<K: Kernel> {
@@ -159,5 +171,11 @@ impl<K: Kernel> KernelObject<K> for ChannelInitiatorObject<K> {
         *active_transaction = None;
 
         Ok(recv_bytes)
+    }
+
+    fn raise_peer_user_signal(&self, kernel: K) -> Result<()> {
+        // Initiator raises USER signal on the handler
+        self.handler.base.signal(kernel, Signals::USER);
+        Ok(())
     }
 }
