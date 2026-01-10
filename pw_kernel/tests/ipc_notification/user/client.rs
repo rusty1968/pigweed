@@ -194,8 +194,9 @@ fn test_bidirectional_notification() -> Result<()> {
     }
     pw_log::info!("  raise_peer_user_signal syscall succeeded");
 
-    // Test 2: Verify server handles the request (even if signal was clobbered)
-    // The CheckUserSignal request verifies the server-side code path works.
+    // Test 2: Verify server received the USER signal
+    // After fixing channel_transact() to use raise() instead of signal(),
+    // the USER signal should persist through the transaction.
     let send_buf = [Op::CheckUserSignal as u8];
     let mut recv_buf = [0u8; 2];
 
@@ -206,16 +207,16 @@ fn test_bidirectional_notification() -> Result<()> {
         return Err(Error::OutOfRange);
     }
 
-    // Note: We don't fail if the server didn't see the signal because
-    // channel_transact's signal() call clobbers USER. This is a known
-    // limitation documented in the safety review.
+    // Server should have seen the USER signal since we now use raise()
+    // instead of signal() in channel_transact().
     if recv_buf[1] == 1 {
-        pw_log::info!("  Server saw USER signal (ideal case)");
+        pw_log::info!("  Server saw USER signal (expected)");
     } else {
-        pw_log::info!("  Server didn't see USER signal (clobbered by transaction - known limitation)");
+        pw_log::error!("  Server didn't see USER signal (unexpected!)");
+        return Err(Error::Internal);
     }
 
-    pw_log::info!("  Bidirectional notification syscall path verified");
+    pw_log::info!("  Bidirectional notification verified");
     Ok(())
 }
 

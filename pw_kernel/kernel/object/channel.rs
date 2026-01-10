@@ -152,7 +152,9 @@ impl<K: Kernel> KernelObject<K> for ChannelInitiatorObject<K> {
         self.base.state.lock(kernel).active_signals -=
             Signals::READABLE | Signals::WRITEABLE | Signals::ERROR;
 
-        self.handler.base.signal(kernel, Signals::READABLE);
+        // Use raise() instead of signal() to preserve any USER signal that
+        // may have been raised on the handler before the transaction.
+        self.handler.base.raise(kernel, Signals::READABLE);
 
         self.object_wait(kernel, Signals::READABLE | Signals::ERROR, deadline)?;
 
