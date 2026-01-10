@@ -42,6 +42,7 @@ enum Op {
     Transform = 2,
     Batch = 3,
     NotifyTest = 4,
+    CheckUserSignal = 5,
 }
 
 impl TryFrom<u8> for Op {
@@ -53,6 +54,7 @@ impl TryFrom<u8> for Op {
             2 => Ok(Op::Transform),
             3 => Ok(Op::Batch),
             4 => Ok(Op::NotifyTest),
+            5 => Ok(Op::CheckUserSignal),
             _ => Err(Error::InvalidArgument),
         }
     }
@@ -110,6 +112,28 @@ fn handle_notify_test(response: &mut [u8]) -> Result<usize> {
     Ok(1)
 }
 
+/// Handle check user signal - report if USER signal was raised on us
+///
+/// This is used to test bidirectional notification (client -> server).
+/// We check if the USER signal is currently set on our handle.
+fn handle_check_user_signal(response: &mut [u8]) -> Result<usize> {
+    // Check if USER signal is set on our IPC handle
+    // Use a zero timeout to do a non-blocking check
+    let user_signal_set = match syscall::object_wait(
+        handle::IPC,
+        Signals::USER,
+        Instant::from_ticks(0), // Non-blocking
+    ) {
+        Ok(signals) => signals.contains(Signals::USER),
+        Err(Error::DeadlineExceeded) => false, // Timeout means signal not set
+        Err(_) => false,
+    };
+
+    response[0] = Op::CheckUserSignal as u8;
+    response[1] = if user_signal_set { 1 } else { 0 };
+    Ok(2)
+}
+
 /// Main server loop
 fn server_loop() -> Result<()> {
     pw_log::info!("Server starting - waiting for IPC requests");
@@ -146,6 +170,7 @@ fn server_loop() -> Result<()> {
             Op::Transform => handle_transform(&request[..req_len], &mut response),
             Op::Batch => handle_batch(&request[..req_len], &mut response),
             Op::NotifyTest => handle_notify_test(&mut response),
+            Op::CheckUserSignal => handle_check_user_signal(&mut response),
         };
 
         // Send response
