@@ -180,6 +180,13 @@ fn validate_handler_function(handler: &ItemFn) -> Result<()> {
 fn save_exception_frame(asm: &mut String, kernel_mode: &KernelMode) {
     asm.push_str("// save the additional registers\n");
     if kernel_mode.save_psp_needed() {
+        // NOTE: We save CONTROL here for stack frame layout compatibility,
+        // but this value may be corrupted if PendSV fires during syscall
+        // processing (when SVCall temporarily elevates privilege).
+        //
+        // The pendsv_swap_sp() function overwrites frame.control with the
+        // thread's canonical_control value before we return, ensuring the
+        // correct value is restored.
         asm.push_str(
             "
             mrs     r1, control
@@ -204,6 +211,14 @@ fn save_exception_frame(asm: &mut String, kernel_mode: &KernelMode) {
 
 fn restore_exception_frame(asm: &mut String, kernel_mode: &KernelMode) {
     if kernel_mode.save_psp_needed() {
+        // NOTE: The control value (r1) restored here comes from the frame,
+        // which has been overwritten with canonical_control by pendsv_swap_sp().
+        // This ensures we always restore the thread's canonical CONTROL value.
+        //
+        // Best practice for CONTROL register updates (per ARM recommendations):
+        //   1. Write to CONTROL
+        //   2. DSB - ensures the write completes before proceeding
+        //   3. ISB - flushes pipeline so subsequent instructions see the change
         asm.push_str(
             "
             mov     sp, r0
@@ -212,6 +227,8 @@ fn restore_exception_frame(asm: &mut String, kernel_mode: &KernelMode) {
             pop     {{ r0 - r1 }}
             msr     psp, r0
             msr     control, r1
+            dsb                     // Ensure CONTROL write completes
+            isb                     // Flush pipeline to see the change
 
             pop     {{ pc }}
     ",

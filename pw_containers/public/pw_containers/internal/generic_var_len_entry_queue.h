@@ -24,6 +24,7 @@
 #include "pw_containers/internal/var_len_entry.h"
 #include "pw_containers/internal/var_len_entry_queue_iterator.h"
 #include "pw_containers/internal/wrap.h"
+#include "pw_preprocessor/compiler.h"
 #include "pw_span/cast.h"
 #include "pw_span/span.h"
 #include "pw_varint/varint.h"
@@ -355,11 +356,12 @@ GenericVarLenEntryQueueBase::GetInfo(ConstByteSpan bytes,
 
 constexpr size_t GenericVarLenEntryQueueBase::AvailableBytes(
     ConstByteSpan bytes, size_t head, size_t tail) {
-  size_t available_bytes = head - tail - 1;
+  PW_ASSERT(head < bytes.size());
+  PW_ASSERT(tail < bytes.size());
   if (head <= tail) {
-    available_bytes += bytes.size();
+    head += bytes.size();
   }
-  return available_bytes;
+  return head - tail - 1;
 }
 
 constexpr bool GenericVarLenEntryQueueBase::Push(ConstByteSpan data,

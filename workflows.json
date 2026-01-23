@@ -34,22 +34,23 @@
       "name": "all_host",
       "use_config": "bazel_default",
       "targets": [
-        "//..."
+        "//...",
+        "//pw_toolchain:cpp_20_check"
       ]
     },
     {
-      "name": "all_host_cpp20",
+      "name": "all_host_cpp17",
       "build_config": {
-        "name": "bazel_default_cpp20",
-        "description": "Host C++20 build",
+        "name": "bazel_default_cpp17",
+        "description": "Host C++17 build",
         "build_type": "bazel",
         "args": [
-          "--//pw_toolchain/cc:cxx_standard=20"
+          "--//pw_toolchain/cc:cxx_standard=17"
         ]
       },
       "targets": [
         "//...",
-        "//pw_toolchain:cpp_20_check"
+        "//pw_toolchain:cpp_17_check"
       ]
     },
     {
@@ -621,24 +622,36 @@
     },
     {
       "name": "default",
-      "description": "Most common builds/configurations",
+      "description": "Common builds/configurations",
+      "builds": [
+        "lm3s6965evb",
+        "jni",
+        "googletest",
+        "asan_fuzztest",
+        "rpc_callback",
+        "grpc"
+      ]
+    },
+    {
+      "name": "host",
+      "description": "Most common host builds/configurations",
       "analyzers": [
         "compile_commands_integration_test",
         "compile_commands_performance_test"
       ],
       "builds": [
         "all_host",
-        "all_host_cpp20",
-        "lm3s6965evb",
-        "jni",
-        "rust_nightly",
-        "googletest",
-        "clippy",
-        "clippy_nightly",
-        "asan_fuzztest",
-        "rpc_callback",
-        "grpc",
+        "all_host_cpp17",
         "docs"
+      ]
+    },
+    {
+      "name": "rust",
+      "description": "Rust builds/configurations",
+      "builds": [
+        "rust_nightly",
+        "clippy",
+        "clippy_nightly"
       ]
     },
     {

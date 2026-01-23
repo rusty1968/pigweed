@@ -50,7 +50,6 @@ void AdvertisingPacketFilter::SetPacketFilters(
          scan_id,
          filters.size());
 
-  scan_ids_.insert(scan_id);
   scan_id_to_filters_[scan_id] = filters;
 
   if (!config_.offloading_supported()) {
@@ -84,7 +83,7 @@ void AdvertisingPacketFilter::SetPacketFilters(
     return;
   }
 
-  if (!is_offloading_filters_) {
+  if (filtering_state_ == FilteringState::kHostFiltering) {
     bt_log(INFO, "hci-le", "controller filter memory available");
     EnableOffloadedFiltering();
     return;
@@ -121,11 +120,7 @@ void AdvertisingPacketFilter::UnsetPacketFilters(ScanId scan_id) {
     return;
   }
 
-  if (is_offloading_filters_) {
-    return;
-  }
-
-  if (MemoryAvailable()) {
+  if (filtering_state_ == FilteringState::kHostFiltering && MemoryAvailable()) {
     bt_log(INFO, "hci-le", "controller filter memory available");
     EnableOffloadedFiltering();
   }
@@ -133,19 +128,13 @@ void AdvertisingPacketFilter::UnsetPacketFilters(ScanId scan_id) {
 
 void AdvertisingPacketFilter::UnsetPacketFiltersInternal(ScanId scan_id,
                                                          bool run_commands) {
-  if (scan_id_to_filters_.count(scan_id) == 0) {
-    return;
-  }
-
-  bt_log(INFO, "hci", "removing packet filters for scan id: %d", scan_id);
-  scan_ids_.erase(scan_id);
   scan_id_to_filters_.erase(scan_id);
 
   if (!config_.offloading_supported()) {
     return;
   }
 
-  if (!is_offloading_filters_) {
+  if (filtering_state_ == FilteringState::kHostFiltering) {
     return;
   }
 
@@ -180,7 +169,7 @@ AdvertisingPacketFilter::Matches(const AdvertisingData::ParseResult& ad,
                                  int8_t rssi) const {
   std::unordered_set<ScanId> result;
 
-  for (uint16_t scan_id : scan_ids_) {
+  for (const auto& [scan_id, _] : scan_id_to_filters_) {
     if (Matches(scan_id, ad, connectable, rssi)) {
       result.insert(scan_id);
     }
@@ -385,7 +374,7 @@ bool AdvertisingPacketFilter::MemoryAvailableForSlots(
 }
 
 void AdvertisingPacketFilter::EnableOffloadedFiltering() {
-  if (is_offloading_filters_) {
+  if (filtering_state_ == FilteringState::kOffloadedFiltering) {
     return;
   }
 
@@ -414,11 +403,11 @@ void AdvertisingPacketFilter::EnableOffloadedFiltering() {
     }
   });
 
-  is_offloading_filters_ = true;
+  filtering_state_ = FilteringState::kOffloadedFiltering;
 }
 
 void AdvertisingPacketFilter::DisableOffloadedFiltering() {
-  if (!is_offloading_filters_) {
+  if (filtering_state_ == FilteringState::kHostFiltering) {
     return;
   }
 
@@ -437,7 +426,7 @@ void AdvertisingPacketFilter::DisableOffloadedFiltering() {
   ResetOpenSlots();
   last_filter_index_ = kStartFilterIndex;
   scan_id_to_index_.clear();
-  is_offloading_filters_ = false;
+  filtering_state_ = FilteringState::kHostFiltering;
 }
 
 bool AdvertisingPacketFilter::IsOffloadable(const DiscoveryFilter& filter) {

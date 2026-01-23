@@ -13,6 +13,10 @@
 // the License.
 #pragma once
 
+#ifdef __cpp_concepts
+#include <concepts>
+#endif  // __cpp_concepts
+
 #include <mutex>
 #include <optional>
 #include <type_traits>
@@ -24,45 +28,71 @@
 #include "pw_memory/container_of.h"
 #include "pw_sync/interrupt_spin_lock.h"
 
-namespace pw::async2 {
-
 /// @submodule{pw_async2,futures}
 
+namespace pw::async2 {
+
+#ifdef __cpp_concepts
+
+/// @concept pw::async2::Future
+///
 /// A `Future` is an abstract handle to an asynchronous operation that is polled
 /// to completion. On completion, futures may return a value representing the
 /// result of the operation.
 ///
-/// Futures are single-use and track their completion status. It is an error
-/// to poll a future after it has already completed.
-///
-/// # Implementing
-///
-/// The future class does not contain any members itself, providing only a core
-/// interface and delegating management to specific implementations.
-///
-/// In practice, developers will rarely derive from `Future` directly. Instead,
-/// they should use a more specific abstract future type like
-/// `ListableFutureWithWaker`, which manages common behaviors like waker
-/// storage.
-///
-/// Deriving from `Future` directly is necessary when these behaviors are not
-/// required; for example, when implementing a future that composes other
-/// futures.
-///
-/// Implementations derived directly from `Future` are required to provide the
-/// following member functions:
-///
-/// - `Poll<T> DoPend(Context& cx)`: Implements the asynchronous operation.
-/// - `void DoMarkComplete()`: Marks the future as complete.
-/// - `bool DoIsComplete() const`: Returns `true` if `DoMarkCompleted` has
-///    previously been called. This must always return a value, even if the
-///    future's provider has been destroyed.
-///
-/// @tparam Derived The concrete class that implements this `Future`.
-/// @tparam T       The type of the value returned by `Pend` upon completion.
-///                 Use `void` for futures that do not return a value.
+/// The `Future` concept describes the future API. All future implementations
+/// must satisfy this concept.
+template <typename T>
+concept Future = requires {
+  /// value_type refers to the type produced by the future.
+  typename T::value_type;
+
+  /// `bool is_complete() const` returns whether the future completed.
+  static_cast<bool (T::*)() const>(&T::is_complete);
+
+  /// `Poll<value_type> Pend(Context&)` advances the future. Returns `Ready`
+  /// when the operation completes. Uses the `Context` to store a waker and
+  /// returns `Pending` if there is more work to do. Must not be called again
+  /// after completing.
+  static_cast<Poll<typename T::value_type> (T::*)(Context&)>(&T::Pend);
+} && std::movable<T>;
+
+#else  // C++17 version
+
+namespace internal {
+
+template <typename T, typename = void>
+struct is_future : std::false_type {};
+
+template <typename T>
+struct is_future<
+    T,
+    std::void_t<typename T::value_type,
+                decltype(std::declval<T&>().Pend(std::declval<Context&>())),
+                decltype(std::declval<const T&>().is_complete())>>
+    : std::conjunction<
+          std::is_convertible<decltype(&T::is_complete), bool (T::*)() const>,
+          std::is_convertible<decltype(&T::Pend),
+                              Poll<typename T::value_type> (T::*)(Context&)>> {
+};
+
+}  // namespace internal
+
+// This variable is named as a type to match the C++20 concept. This makes it
+// possible to use `Future` in static asserts in either C++17 or C++20.
+template <typename T>
+constexpr bool Future =
+    internal::is_future<std::remove_cv_t<std::remove_reference_t<T>>>::value;
+
+#endif  // __cpp_concepts
+
+namespace internal {
+
+/// Optional future base class for future implementations. Provides
+/// `value_type`, `Pend()`, and `is_complete()`. Requires the derived class to
+/// implement `DoPend(), `DoMarkComplete()`, and `DoIsComplete()`.
 template <typename Derived, typename T>
-class Future {
+class FutureBase {
  public:
   using value_type = std::conditional_t<std::is_void_v<T>, ReadyType, T>;
 
@@ -88,343 +118,14 @@ class Future {
   bool is_complete() const { return derived().DoIsComplete(); }
 
  protected:
-  constexpr Future() = default;
+  constexpr FutureBase() = default;
 
  private:
   Derived& derived() { return static_cast<Derived&>(*this); }
   const Derived& derived() const { return static_cast<const Derived&>(*this); }
 };
 
-template <typename T, typename = void>
-struct is_future : std::false_type {};
-
-template <typename T>
-struct is_future<
-    T,
-    std::void_t<typename T::value_type,
-                decltype(std::declval<T&>().Pend(std::declval<Context&>())),
-                decltype(std::declval<const T&>().is_complete())>>
-    : std::is_convertible<decltype(&T::Pend),
-                          Poll<typename T::value_type> (T::*)(Context&)> {};
-
-template <typename T>
-constexpr bool is_future_v =
-    is_future<std::remove_cv_t<std::remove_reference_t<T>>>::value;
-
-/// Manages a list of futures for a single asynchronous operation.
-///
-/// An asynchronous operation that vends futures to multiple callers can use a
-/// `ListFutureProvider` to track them. This class can be used with any future
-/// that derives from a listable type like `ListableFutureWithWaker`. The
-/// provider and its futures automatically handle list updates during moves.
-///
-/// All operations on the list are thread-safe, allowing futures to be modified
-/// from outside of an async context (for example, to complete a future on an
-/// external signal). The type of lock used is configurable, though it is
-/// important to understand that the lock will be acquired within the
-/// asynchronous dispatcher's thread. Therefore, it is strongly recommended to
-/// avoid long-blocking locks such as mutexes as they will stall other tasks.
-///
-/// The default lock is a `pw::sync::InterruptSpinLock`, which is a safe
-/// choice for use within an async context. If it is certain that futures in
-/// the list will only be managed from within an async context (for example,
-/// between different async tasks), a no-op lock can be used for efficiency.
-///
-/// The future list is FIFO: `Pop` returns futures in the order they were added.
-///
-/// When a future in the list is destroyed, it safely removes itself. The
-/// provider is not notified of this event.
-template <typename FutureType, typename Lock = sync::InterruptSpinLock>
-class ListFutureProvider {
- public:
-  constexpr ListFutureProvider() = default;
-
-  ListFutureProvider(const ListFutureProvider&) = delete;
-  ListFutureProvider& operator=(const ListFutureProvider&) = delete;
-
-  /// Adds a future to the end of the list.
-  void Push(FutureType& future) {
-    std::lock_guard lock(lock_);
-    futures_.push_back(future);
-  }
-
-  /// Removes and returns the first future from the list, if one exists.
-  std::optional<std::reference_wrapper<FutureType>> Pop() {
-    std::lock_guard lock(lock_);
-    if (futures_.empty()) {
-      return std::nullopt;
-    }
-    FutureType& future = futures_.front();
-    futures_.pop_front();
-    return std::ref(future);
-  }
-
-  /// Returns `true` if there are no futures listed.
-  bool empty() {
-    std::lock_guard lock(lock_);
-    return futures_.empty();
-  }
-
-  /// Provides access to the list's internal lock.
-  Lock& lock() { return lock_; }
-
- private:
-  friend FutureType;
-
-  template <typename, typename>
-  friend class ListableFutureWithWaker;
-
-  using LockType = Lock;
-
-  IntrusiveList<FutureType> futures_;
-  Lock lock_;
-};
-
-/// Manages a single future for an asynchronous operation.
-///
-/// An asynchronous operation which can only have a single caller can use a
-/// `SingleFutureProvider` to manage its reference to the future. This can be
-/// used with any listable future type, and automatically handles updates
-/// during moves.
-///
-/// All operations on the provider are thread-safe.
-///
-/// If the future belonging to the provider is destroyed, it safely removes
-/// itself. The provider is not notified of this event.
-template <typename FutureType>
-class SingleFutureProvider {
- public:
-  constexpr SingleFutureProvider() = default;
-
-  SingleFutureProvider(const SingleFutureProvider&) = delete;
-  SingleFutureProvider& operator=(const SingleFutureProvider&) = delete;
-
-  /// Sets the provider's future. Crashes if a future is already set.
-  void Set(FutureType& future) {
-    PW_ASSERT(!has_future());
-    inner_.Push(future);
-  }
-
-  /// Attempts to set the provider's future, returning `true` if successful.
-  bool TrySet(FutureType& future) {
-    if (has_future()) {
-      return false;
-    }
-    inner_.Push(future);
-    return true;
-  }
-
-  /// Claims the provider's future, leaving it unset.
-  [[nodiscard]] std::optional<std::reference_wrapper<FutureType>> Take() {
-    return inner_.Pop();
-  }
-
-  /// Returns `true` if the provider has a future.
-  bool has_future() { return !inner_.empty(); }
-
- private:
-  template <typename, typename>
-  friend class ListableFutureWithWaker;
-  friend FutureType;
-
-  ListFutureProvider<FutureType> inner_;
-};
-
-/// An abstract movable future that is stored in an intrusive linked list
-/// managed by a `ListFutureProvider`.
-///
-/// `ListableFutureWithWaker` is extended by concrete future types for
-/// specific asynchronous operations. It internally handles list management
-/// during moves and stores the `Waker` of the task that polled it.
-///
-/// # Implementing
-///
-/// A concrete future that derives from `ListableFutureWithWaker` must provide a
-/// `DoPend` method and implement its own move constructor and move assignment
-/// operator. It must also provide a
-/// `static constexpr const char kWaitReason[]` that is used as the waker's wait
-/// reason.
-///
-/// The move operations must first move any members of the derived class, then
-/// call the base `MoveFrom` method to transfer the intrusive list pointers and
-/// waker.
-///
-/// @code{.cpp}
-/// class MyFuture : public ListableFutureWithWaker<MyFuture, int> {
-///  public:
-///   static constexpr const char kWaitReason[] = "MyFuture";
-///
-///   MyFuture(MyFuture&& other) noexcept
-///       : ListableFutureWithWaker(kMovedFrom) {
-///     // First, move any derived members.
-///     provider_ = std::exchange(other.provider_, nullptr);
-///     // Finally, call the base class to handle its state.
-///     ListableFutureWithWaker::MoveFrom(other);
-///   }
-///
-///   MyFuture& operator=(MyFuture&& other) noexcept {
-///     provider_ = std::exchange(other.provider_, nullptr);
-///     ListableFutureWithWaker::MoveFrom(other);
-///     return *this;
-///   }
-///
-///  private:
-///   // ...
-/// };
-/// @endcode
-///
-/// If a listable future is destroyed while it is in a provider's list, it
-/// safely removes itself. The provider is not notified of this. Asynchronous
-/// operations which require more complex cancellation or cleanup must handle
-/// this in their `Derived` future's destructor.
-///
-/// @tparam Derived The concrete class that implements this future.
-/// @tparam T The type of the value returned by `Poll`.
-template <typename Derived, typename T>
-class ListableFutureWithWaker
-    : public Future<ListableFutureWithWaker<Derived, T>, T>,
-      public IntrusiveList<Derived>::Item {
- public:
-  ListableFutureWithWaker(const ListableFutureWithWaker&) = delete;
-  ListableFutureWithWaker& operator=(const ListableFutureWithWaker&) = delete;
-
- protected:
-  /// Wrapper around a future provider pointer which also serves as a
-  /// conditional lock, allowing for nullptr.
-  class PW_LOCKABLE("pw::async2::ListableFutureWithWaker::Lock") Provider {
-   public:
-    void lock() PW_EXCLUSIVE_LOCK_FUNCTION() {
-      if (provider_ != nullptr) {
-        provider_->lock().lock();
-      }
-    }
-
-    void unlock() PW_UNLOCK_FUNCTION() {
-      if (provider_ != nullptr) {
-        provider_->lock().unlock();
-      }
-    }
-
-    Provider& operator=(ListFutureProvider<Derived>* provider) {
-      provider_ = provider;
-      return *this;
-    }
-
-    ListFutureProvider<Derived>* get() const { return provider_; }
-    ListFutureProvider<Derived>& operator*() const {
-      PW_ASSERT(provider_ != nullptr);
-      return *provider_;
-    }
-    ListFutureProvider<Derived>* operator->() const {
-      PW_ASSERT(provider_ != nullptr);
-      return provider_;
-    }
-
-    explicit operator bool() const { return provider_ != nullptr; }
-
-   private:
-    friend class ListableFutureWithWaker<Derived, T>;
-
-    explicit Provider(ListFutureProvider<Derived>* provider)
-        : provider_(provider) {}
-
-    ListFutureProvider<Derived>* provider_;
-  };
-
-  using Lock = Provider;
-
-  /// Tag to prevent accidental default construction.
-  enum ConstructedState { kMovedFrom, kReadyForCompletion };
-
-  /// Initializes a future in an "empty" state.
-  /// `state` determines the behavior as follows:
-  ///
-  /// - `kMovedFrom`: The constructed future appears as one which has been moved
-  ///   and is marked completed. This should be used from from derived futures'
-  ///   move constructors, followed by a call to `MoveFrom` to set the
-  ///   appropriate base state.
-  ///
-  /// - `kReadyForCompletion`: The constructed future lacks a provider but is
-  ///   incomplete and can still be called. This can help to construct futures
-  ///   which are initially `Ready`. If a future is constructed in this state,
-  ///   its `DoPend` must return `Ready`.
-  explicit ListableFutureWithWaker(ConstructedState state)
-      : provider_(nullptr), complete_(state == kMovedFrom) {}
-
-  explicit ListableFutureWithWaker(ListFutureProvider<Derived>& provider)
-      : provider_(&provider) {
-    provider.Push(derived());
-  }
-  explicit ListableFutureWithWaker(SingleFutureProvider<Derived>& single)
-      : ListableFutureWithWaker(single.inner_) {}
-
-  ~ListableFutureWithWaker() {
-    if (!provider_) {
-      return;
-    }
-    std::lock_guard guard(lock());
-    if (!this->unlisted()) {
-      this->unlist();
-    }
-  }
-
-  void MoveFrom(ListableFutureWithWaker& other) {
-    complete_ = std::exchange(other.complete_, true);
-    provider_ = std::exchange(other.provider_, nullptr);
-    waker_ = std::move(other.waker_);
-
-    if (provider_) {
-      std::lock_guard guard(lock());
-      if (!other.unlisted()) {
-        this->replace(other);
-      }
-    }
-  }
-
-  ListFutureProvider<Derived>& provider() { return *provider_; }
-
-  Lock& lock() { return provider_; }
-
-  /// Wakes the task waiting on the future.
-  void Wake() { waker_.Wake(); }
-
- private:
-  using Base = Future<ListableFutureWithWaker<Derived, T>, T>;
-
-  friend Base;
-  friend ListFutureProvider<Derived>;
-
-  Poll<typename Base::value_type> DoPend(Context& cx) {
-    static_assert(
-        std::is_same_v<std::remove_extent_t<decltype(Derived::kWaitReason)>,
-                       const char>,
-        "kWaitReason must be a character array");
-
-    Poll<typename Base::value_type> poll = derived().DoPend(cx);
-    if (poll.IsPending()) {
-      PW_ASYNC_STORE_WAKER(cx, waker_, Derived::kWaitReason);
-      Relist();
-    }
-    return poll;
-  }
-
-  /// Adds the future back into its provider's list if unlisted.
-  void Relist() {
-    std::lock_guard guard(lock());
-    if (provider_ && this->unlisted()) {
-      provider_->futures_.push_back(derived());
-    }
-  }
-
-  void DoMarkComplete() { complete_ = true; }
-  bool DoIsComplete() const { return complete_; }
-
-  Derived& derived() { return static_cast<Derived&>(*this); }
-
-  Provider provider_;
-  Waker waker_;
-  bool complete_ = false;
-};
+}  // namespace internal
 
 /// `FutureCore` provides common functionality for futures that need to be
 /// wakeable and stored in a list.
@@ -492,9 +193,32 @@ class FutureCore : public IntrusiveForwardList<FutureCore>::Item {
     state_ = State::kReady;
   }
 
+  /// Provides direct access to the waker for future implementations that
+  /// manually store a waker.
+  ///
+  /// @warning Do not use this function when `FutureCore::DoPend` is used.
+  /// `FutureCore::DoPend` stores the waker when `Pend()` returns `Pending`.
+  Waker& waker() { return waker_; }
+
+  /// Mark the future as complete, which indicates that a future has returned
+  /// `Ready` from its `Pend` function.
+  ///
+  /// @warning Do not use this function when `FutureCore::DoPend` is used.
+  /// `FutureCore::DoPend` calls `MarkComplete` when `Pend()` returns `Ready`.
+  void MarkComplete() { state_ = State::kComplete; }
+
   /// Removes this future from its list, if it is in one.
   void Unlist() { unlist(); }
 
+  /// Optional `Pend()` function that defers to the future implementation's
+  /// `DoPend(Context&)` function. `FutureCore::DoPend` does the following:
+  ///
+  /// - Asserts that the future is pendable.
+  /// - If the future's `DoPend` returns `Pending`, stores a waker.
+  /// - If the future's `DoPend` returns `Ready`, marks the future as complete.
+  ///
+  /// It is recommended for `Pend` to use `FutureCore::DoPend`, but not
+  /// required. Custom `Pend` implementations must enforce the same semantics.
   template <typename FutureType>
   auto DoPend(FutureType& future, Context& cx) PW_NO_LOCK_SAFETY_ANALYSIS {
     PW_ASSERT(is_pendable());
@@ -503,7 +227,7 @@ class FutureCore : public IntrusiveForwardList<FutureCore>::Item {
     if (poll.IsPending()) {
       PW_ASYNC_STORE_WAKER(cx, waker_, FutureType::kWaitReason);
     } else {
-      state_ = State::kComplete;
+      MarkComplete();
     }
 
     return poll;
@@ -590,26 +314,42 @@ class BaseFutureList {
 /// List of futures of a custom future type. This is a minimal extension to
 /// `BaseFutureList`.
 ///
-/// @tparam kGetFuture either a function that converts a `FutureCore` to its
-///     corresponding future type, or a pointer to the `FutureCore` member
-///     within the future.
-template <auto kGetFuture,
-          bool kIsMemberPtr =
-              std::is_member_object_pointer_v<decltype(kGetFuture)>>
-class FutureList : public BaseFutureList {
+/// @tparam kGetFutureImpl a function that converts a `FutureCore&` to its
+///     corresponding future type
+/// @tparam kGetFutureCore a function that converts a future reference to its
+///     corresponding `FutureCore`.
+template <auto kGetFutureImpl, auto kGetFutureCore>
+class CustomFutureList : public BaseFutureList {
  public:
-  using value_type = std::remove_reference_t<decltype(*kGetFuture(
+  using value_type = std::remove_reference_t<decltype(*kGetFutureImpl(
       std::declval<FutureCore*>()))>;
   using pointer = value_type*;
   using reference = value_type&;
 
-  constexpr FutureList() = default;
+  constexpr CustomFutureList() = default;
 
-  pointer PopIfAvailable() {
-    return kGetFuture(BaseFutureList::PopIfAvailable());
+  void Push(FutureCore& future) { BaseFutureList::Push(future); }
+  void Push(reference future) { Push(kGetFutureCore(future)); }
+
+  void PushRequireEmpty(FutureCore& future) {
+    BaseFutureList::PushRequireEmpty(future);
+  }
+  void PushRequireEmpty(reference future) {
+    PushRequireEmpty(kGetFutureCore(future));
   }
 
-  reference Pop() { return *kGetFuture(BaseFutureList::PopIfAvailable()); }
+  bool PushIfEmpty(FutureCore& future) {
+    return BaseFutureList::PushIfEmpty(future);
+  }
+  bool PushIfEmpty(reference future) {
+    return PushIfEmpty(kGetFutureCore(future));
+  }
+
+  pointer PopIfAvailable() {
+    return kGetFutureImpl(BaseFutureList::PopIfAvailable());
+  }
+
+  reference Pop() { return *kGetFutureImpl(BaseFutureList::PopIfAvailable()); }
 
   template <typename Resolver>
   void ResolveAllWith(Resolver&& resolver) {
@@ -626,10 +366,13 @@ class FutureList : public BaseFutureList {
   }
 };
 
-// Allow passing a pointer-to-member instead of a function.
+/// A `CustomFutureList` that uses a pointer to a `FutureCore` member.
+///
+/// @tparam kMemberPtr pointer to a `FutureCore` member of a custom future
+///     class
 template <auto kMemberPtr>
-class FutureList<kMemberPtr, true>
-    : public FutureList<pw::ContainerOf<kMemberPtr, FutureCore>> {};
+using FutureList =
+    CustomFutureList<ContainerOf<kMemberPtr, FutureCore>, MemberOf<kMemberPtr>>;
 
 /// @endsubmodule
 

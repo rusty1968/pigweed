@@ -21,19 +21,28 @@
 #include "pw_bluetooth_proxy/l2cap_channel_manager_interface.h"
 #include "pw_containers/dynamic_vector.h"
 #include "pw_containers/intrusive_map.h"
+#include "pw_span/span.h"
 #include "pw_sync/lock_annotations.h"
 #include "pw_sync/mutex.h"
 
 namespace pw::bluetooth::proxy::gatt {
 
 enum class AttributeHandle : uint16_t {};
+
+namespace internal {
 enum class ClientId : uint16_t {};
+enum class ServerId : uint16_t {};
+}  // namespace internal
 
 /// New values may be added.
 enum class Error : uint8_t {
   kDisconnection,
   kReset,
   kClosedByClient,
+};
+
+struct CharacteristicInfo {
+  AttributeHandle value_handle;
 };
 
 class Gatt;
@@ -104,14 +113,118 @@ class Client final {
  private:
   friend class Gatt;
 
-  Client(ClientId client_id, ConnectionHandle connection_handle, Gatt& gatt);
+  Client(internal::ClientId client_id,
+         ConnectionHandle connection_handle,
+         Gatt& gatt);
 
   void Move(Client&& other);
 
-  ClientId client_id_;
+  internal::ClientId client_id_;
   ConnectionHandle connection_handle_;
 
   // nullptr when the client is closed, default constructed, or moved from.
+  Gatt* gatt_ = nullptr;
+};
+
+/// Server represents the server role of a GATT connection to a remote device.
+/// Many Servers can exist per connection.
+///
+/// This class is NOT thread-safe and requires external synchronization if used
+/// by multiple threads. However, it is thread safe with respect to other
+/// Server/Client objects and the Gatt API.
+class Server {
+ public:
+  /// This delegate uses the NVI pattern.
+  /// The `Delegate` must live until a call to `HandleError`. Closing the
+  /// `Server` will send the error `kClosedByClient`.
+  class Delegate {
+   public:
+    virtual ~Delegate() = default;
+    void HandleWriteWithoutResponse(ConnectionHandle connection_handle,
+                                    AttributeHandle value_handle,
+                                    FlatConstMultiBuf&& value);
+
+    void HandleWriteAvailable(ConnectionHandle connection_handle);
+
+    void HandleError(Error error, ConnectionHandle connection_handle);
+
+   private:
+    /// Called when a Write Without Response (ATT_WRITE_CMD) PDU is received for
+    /// an offloaded characteristic with value handle `value_handle`. It is NOT
+    /// SAFE to call other Server/Gatt/Client APIs from within this method.
+    /// Re-entrant calls will result in deadlock.
+    virtual void DoHandleWriteWithoutResponse(
+        ConnectionHandle connection_handle,
+        AttributeHandle value_handle,
+        FlatConstMultiBuf&& value) = 0;
+
+    /// Called when queue space for TX packets is available.
+    /// The only API call that is allowed inside of this method is
+    /// Server::SendNotification(). Other API calls will deadlock.
+    virtual void DoHandleWriteAvailable(ConnectionHandle connection_handle) = 0;
+
+    /// Called when a fatal error occurs (e.g. the connection closed or
+    /// controller reset). The delegate will not be called again after an error
+    /// has been reported, so it is safe to free it.
+    virtual void DoHandleError(Error error,
+                               ConnectionHandle connection_handle) = 0;
+  };
+
+  Server() = default;
+  ~Server();
+  Server(Server& other) = delete;
+  Server& operator=(Server& other) = delete;
+  Server(Server&& other);
+  Server& operator=(Server&& other);
+
+  /// Unregisters the Server and delegate.
+  /// Alternatively, the server may be destroyed.
+  /// The delegate will be notified with a kClosedByClient error.
+  void Close();
+
+  /// Add a characteristic to this Server's set of offloaded characteristics.
+  ///
+  /// @returns
+  /// * @OK: Success.
+  /// * @ALREADY_EXISTS: The characteristic is already being handled by a
+  /// Server.
+  /// * @RESOURCE_EXHAUSTED: A memory allocation failed.
+  /// * @FAILED_PRECONDITION: The connection or Server is no longer registered.
+  Status AddCharacteristic(CharacteristicInfo characteristic);
+
+  /// Remove a characteristic from this Server's set of offloaded
+  /// characteristics.
+  ///
+  /// @returns
+  /// * @OK: Success.
+  /// * @FAILED_PRECONDITION: The connection or Server is no longer registered.
+  /// * @NOT_FOUND: The characteristic was already not being offloaded by this
+  /// Server.
+  Status RemoveCharacteristic(CharacteristicInfo characteristic);
+
+  /// Send a GATT notification for `value_handle` with payload `value` to the
+  /// remote device. On failure (e.g. queue full), returns an error status and
+  /// the `value`.
+  ///
+  /// @returns
+  /// * @OK: The notification has been queued for transmission.
+  /// * @FAILED_PRECONDITION: The connection or Server has already been closed.
+  /// * @INVALID_ARGUMENT: `value_handle` is not being offloaded by this Server.
+  /// * @RESOURCE_EXHAUSTED: An allocation failed.
+  [[nodiscard]] StatusWithMultiBuf SendNotification(
+      AttributeHandle value_handle, FlatConstMultiBuf&& value);
+
+ private:
+  friend class Gatt;
+
+  Server(internal::ServerId server_id,
+         ConnectionHandle connection_handle,
+         Gatt& gatt);
+
+  void Move(Server&& other);
+
+  internal::ServerId server_id_{0};
+  ConnectionHandle connection_handle_{0};
   Gatt* gatt_ = nullptr;
 };
 
@@ -143,22 +256,110 @@ class Gatt {
   /// is called or the Client is closed/destroyed.
   ///
   /// @returns
-  /// * @OK: The attribute is now being intercepted.
-  /// * @UNAVAILABLE: Allocation failed or the ATT channel could not be
-  /// intercepted.
+  /// * @OK: Success. A Client is returned.
+  /// * @RESOURCE_EXHAUSTED: An internal ID could not be allocated for this
+  /// client.
+  /// * @UNAVAILABLE: A memory allocation failed or the L2CAP channel could not
+  /// be acquired.
   Result<Client> CreateClient(ConnectionHandle connection_handle,
                               Client::Delegate& delegate);
 
+  /// Create a GATT server for a specific connection only.
+  /// Characteristics can only be owned by 1 Server at a time.
+  /// @param delegate Must be valid until an error is reported.
+  ///
+  /// @returns
+  /// * @OK: Success. A Server is returned.
+  /// * @ALREADY_EXISTS: One or more of the characteristics is already being
+  /// handled by a Server.
+  /// * @RESOURCE_EXHAUSTED: An internal ID could not be allocated for this
+  /// server or a memory allocation failed.
+  /// * @UNAVAILABLE: The L2CAP channel could not be acquired.
+  Result<Server> CreateServer(ConnectionHandle connection_handle,
+                              span<const CharacteristicInfo> characteristics,
+                              Server::Delegate& delegate);
+
  private:
   friend class Client;
+  friend class Server;
 
-  void UnregisterClient(ClientId client_id, ConnectionHandle connection_handle);
+  struct ClientState final
+      : IntrusiveMap<std::underlying_type_t<internal::ClientId>,
+                     ClientState>::Pair {
+    ClientState(internal::ClientId client_id, Client::Delegate& client_delegate)
+        : IntrusiveMap<std::underlying_type_t<internal::ClientId>,
+                       ClientState>::Pair(cpp23::to_underlying(client_id)),
+          delegate(client_delegate) {}
 
-  Status InterceptNotification(ClientId client,
+    Client::Delegate& delegate;
+  };
+
+  struct ServerState final
+      : IntrusiveMap<std::underlying_type_t<internal::ServerId>,
+                     ServerState>::Pair {
+    ServerState(internal::ServerId server_id, Server::Delegate& server_delegate)
+        : IntrusiveMap<std::underlying_type_t<internal::ServerId>,
+                       ServerState>::Pair(cpp23::to_underlying(server_id)),
+          delegate(server_delegate) {}
+
+    Server::Delegate& delegate;
+  };
+
+  using ServerMap =
+      IntrusiveMap<std::underlying_type_t<internal::ServerId>, ServerState>;
+
+  struct CharacteristicState final
+      : IntrusiveMap<std::underlying_type_t<AttributeHandle>,
+                     CharacteristicState>::Pair {
+    CharacteristicState(AttributeHandle handle, internal::ServerId server_id_in)
+        : IntrusiveMap<std::underlying_type_t<AttributeHandle>,
+                       CharacteristicState>::Pair(cpp23::to_underlying(handle)),
+          server_id(server_id_in) {}
+    internal::ServerId server_id;
+  };
+
+  using CharacteristicMap =
+      IntrusiveMap<std::underlying_type_t<AttributeHandle>,
+                   CharacteristicState>;
+
+  struct Connection final
+      : IntrusiveMap<std::underlying_type_t<ConnectionHandle>,
+                     Connection>::Pair {
+    Connection(ConnectionHandle handle, Allocator& allocator)
+        : IntrusiveMap<std::underlying_type_t<ConnectionHandle>,
+                       Connection>::Pair(cpp23::to_underlying(handle)),
+          intercepted_notifications_(allocator) {}
+
+    UniquePtr<ChannelProxy> att_channel;
+    DynamicVector<std::pair<AttributeHandle, internal::ClientId>>
+        intercepted_notifications_;
+    // Entries are allocated with allocator_.
+    IntrusiveMap<std::underlying_type_t<internal::ClientId>, ClientState>
+        clients;
+    CharacteristicMap characteristics;
+    ServerMap servers;
+  };
+
+  struct QueuedWriteAvailable {
+    internal::ServerId server_id;
+    ConnectionHandle connection_handle;
+    Server::Delegate* delegate;
+  };
+
+  using ConnectionMap =
+      IntrusiveMap<std::underlying_type_t<ConnectionHandle>, Connection>;
+
+  void UnregisterClient(internal::ClientId client_id,
+                        ConnectionHandle connection_handle);
+
+  void UnregisterServer(internal::ServerId server_id,
+                        ConnectionHandle connection_handle);
+
+  Status InterceptNotification(internal::ClientId client,
                                ConnectionHandle connection_handle,
                                AttributeHandle value_handle);
 
-  Status CancelInterceptNotification(ClientId client,
+  Status CancelInterceptNotification(internal::ClientId client,
                                      ConnectionHandle connection_handle,
                                      AttributeHandle value_handle);
 
@@ -181,44 +382,54 @@ class Gatt {
   void OnChannelClosedEvent(ConnectionHandle connection_handle)
       PW_LOCKS_EXCLUDED(mutex_);
 
+  void OnWriteAvailable(ConnectionHandle connection_handle)
+      PW_LOCKS_EXCLUDED(mutex_);
+
   void ResetConnections() PW_LOCKS_EXCLUDED(mutex_);
 
-  struct ClientState final
-      : IntrusiveMap<std::underlying_type_t<ClientId>, ClientState>::Pair {
-    ClientState(ClientId client_id, Client::Delegate& client_delegate)
-        : IntrusiveMap<std::underlying_type_t<ClientId>, ClientState>::Pair(
-              cpp23::to_underlying(client_id)),
-          delegate(client_delegate) {}
+  StatusWithMultiBuf SendNotification(internal::ServerId server_id,
+                                      ConnectionHandle connection_handle,
+                                      AttributeHandle value_handle,
+                                      FlatConstMultiBuf&& value);
 
-    Client::Delegate& delegate;
-  };
+  ConnectionMap::iterator FindOrInterceptAttChannel(
+      ConnectionHandle connection_handle) PW_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
-  struct Connection final
-      : IntrusiveMap<std::underlying_type_t<ConnectionHandle>,
-                     Connection>::Pair {
-    Connection(ConnectionHandle handle, Allocator& allocator)
-        : IntrusiveMap<std::underlying_type_t<ConnectionHandle>,
-                       Connection>::Pair(cpp23::to_underlying(handle)),
-          intercepted_notifications_(allocator) {}
+  void DrainCharacteristics(CharacteristicMap& characteristics);
 
-    UniquePtr<ChannelProxy> att_channel;
-    DynamicVector<std::pair<AttributeHandle, ClientId>>
-        intercepted_notifications_;
-    // Entries are allocated with allocator_.
-    IntrusiveMap<std::underlying_type_t<ClientId>, ClientState> clients;
-  };
+  bool OnAttHandleValueNtfFromController(ConstByteSpan payload,
+                                         ConnectionMap::iterator conn_iter)
+      PW_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+
+  bool OnAttWriteCmdFromController(ConstByteSpan payload,
+                                   ConnectionMap::iterator conn_iter)
+      PW_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+
+  Status AddCharacteristic(internal::ServerId server_id,
+                           ConnectionHandle connection_handle,
+                           CharacteristicInfo characteristic);
+
+  Status RemoveCharacteristic(internal::ServerId server_id,
+                              ConnectionHandle connection_handle,
+                              CharacteristicInfo characteristic);
+
+  sync::Mutex write_available_mutex_;
+  sync::Mutex mutex_ PW_ACQUIRED_AFTER(write_available_mutex_);
 
   L2capChannelManagerInterface& l2cap_;
   Allocator& allocator_;
   MultiBufAllocator& multibuf_allocator_;
 
-  sync::Mutex mutex_;
-
   // Entries are allocated with allocator_.
-  IntrusiveMap<std::underlying_type_t<ConnectionHandle>, Connection>
-      connections_ PW_GUARDED_BY(mutex_);
+  ConnectionMap connections_ PW_GUARDED_BY(mutex_);
 
-  uint16_t next_client_id_ PW_GUARDED_BY(mutex_) = 0;
+  uint16_t next_id_ PW_GUARDED_BY(mutex_) = 0;
+
+  // In order to prevent deadlock, Server::Delegate::HandleWriteAvailable
+  // notifications are queued while mutex_ is locked and then sent when only
+  // write_available_mutex_ is locked.
+  DynamicVector<QueuedWriteAvailable> write_available_queue_
+      PW_GUARDED_BY(write_available_mutex_){allocator_};
 };
 
 }  // namespace pw::bluetooth::proxy::gatt

@@ -12,6 +12,19 @@
 // License for the specific language governing permissions and limitations under
 // the License.
 
+// Compile-time feature detection assertions
+#[cfg(all(feature = "user_space", not(feature = "armv7m"), not(feature = "armv8m")))]
+compile_error!("FEATURE CHECK: user_space enabled but neither armv7m nor armv8m!");
+
+#[cfg(all(feature = "armv7m", feature = "armv8m"))]
+compile_error!("FEATURE CHECK: Both armv7m and armv8m features enabled - invalid!");
+
+#[cfg(all(feature = "armv7m", not(feature = "user_space")))]
+compile_error!("FEATURE CHECK: armv7m enabled but user_space NOT enabled!");
+
+#[cfg(not(feature = "user_space"))]
+compile_error!("FEATURE CHECK: user_space feature is NOT enabled!");
+
 use core::arch::asm;
 use core::mem::{self, MaybeUninit};
 use core::ptr::NonNull;
@@ -32,11 +45,10 @@ use crate::exceptions::{
     ExcReturn, ExcReturnFrameType, ExcReturnMode, ExcReturnRegisterStacking, ExcReturnStack,
     ExceptionFrame, KernelExceptionFrame, RetPsrVal, exception,
 };
-use crate::protection::MemoryConfig;
 use crate::regs::Regs;
 use crate::regs::msr::{ControlVal, Spsel};
 use crate::spinlock::BareSpinLock;
-use crate::{in_interrupt_handler, nvic};
+use crate::{MemoryConfig, in_interrupt_handler, nvic};
 
 const LOG_THREAD_CREATE: bool = false;
 const LOG_CONTEXT_SWITCH: bool = false;
@@ -66,6 +78,25 @@ pub struct ArchThreadState {
     frame: *mut KernelExceptionFrame,
     memory_config: *const MemoryConfig,
     local: ThreadLocalState<crate::Arch>,
+    /// The canonical CONTROL register value for this thread.
+    /// This is an invariant property set at thread creation:
+    /// - User threads: 0x03 (nPRIV=1, SPSEL=1)
+    /// - Kernel threads: 0x00 (nPRIV=0, SPSEL=0)
+    /// 
+    /// We store this explicitly because the live CONTROL register may be
+    /// temporarily modified during syscall processing (privilege elevation),
+    /// and PendSV must restore the canonical value, not the transient one.
+    #[cfg(feature = "user_space")]
+    pub canonical_control: ControlVal,
+    /// The canonical EXC_RETURN value for this thread.
+    /// This is an invariant property set at thread creation:
+    /// - User threads: 0xFFFFFFFD (Thread mode, PSP, standard frame)
+    /// - Kernel threads: 0xFFFFFFF9 (Thread mode, MSP, standard frame)
+    ///
+    /// We store this explicitly because PendSV may capture a wrong EXC_RETURN
+    /// if it fires during syscall processing (when we're in Thread mode using MSP).
+    #[cfg(feature = "user_space")]
+    pub canonical_return_address: u32,
 }
 
 impl ArchThreadState {
@@ -98,6 +129,13 @@ impl ArchThreadState {
             (*kernel_frame).return_address = return_address.bits().cast_into();
         }
         self.frame = kernel_frame;
+        // Store the canonical CONTROL value for this thread.
+        // This is the authoritative value that PendSV will restore.
+        #[cfg(feature = "user_space")]
+        {
+            self.canonical_control = control;
+            self.canonical_return_address = return_address.bits().cast_into();
+        }
     }
 }
 
@@ -129,14 +167,17 @@ impl Arch for crate::Arch {
 
         // Remember active_thread only if it wasn't already set and trigger
         // a pendsv only the first time
-        unsafe {
+        let did_set_pendsv = unsafe {
             if get_active_thread().is_null() {
                 set_active_thread(old_thread_state);
 
                 // Queue a PendSV
                 SCB::set_pendsv();
+                true
+            } else {
+                false
             }
-        }
+        };
 
         // Slightly different path based on if we're already inside an interrupt handler or not.
         if !in_interrupt_handler() {
@@ -158,8 +199,10 @@ impl Arch for crate::Arch {
             // old thread is context switched back to.
 
             sched_state = crate::Arch::get_scheduler(crate::Arch).lock(crate::Arch);
-        } else {
-            // in interrupt context the pendsv should have already triggered it
+        } else if did_set_pendsv {
+            // In interrupt context, verify PendSV is pending only if we set it.
+            // If a context switch was already queued (active_thread was not null),
+            // PendSV may have been consumed by a previous handler.
             pw_assert::assert!(SCB::is_pendsv_pending());
         }
         sched_state
@@ -227,12 +270,16 @@ impl Arch for crate::Arch {
             // Note: Higher values have lower priority
             let mut scb = p.SCB;
 
-            // Set SVCall (system calls) to the lowest priority.
-            scb.set_priority(scb::SystemHandler::SVCall, 0b1111_1111);
+            // Set PendSV (used by context switching) to the lowest priority.
+            // This ensures PendSV cannot preempt SVCall, which is critical
+            // because SVCall uses fake exception frames that would be corrupted
+            // if PendSV preempted mid-setup.
+            scb.set_priority(scb::SystemHandler::PendSV, 0b1111_1111);
 
-            // Set PendSV (used by context switching) to just above SVCall so
-            // that system calls can context switch.
-            scb.set_priority(scb::SystemHandler::PendSV, 0b1011_1111);
+            // Set SVCall (system calls) to just above PendSV.
+            // This allows syscalls to complete without being preempted by
+            // context switches, while still being preemptable by IRQs.
+            scb.set_priority(scb::SystemHandler::SVCall, 0b1011_1111);
 
             // Set IRQs to a priority above SVCall and PendSV so that they
             // can preempt them.
@@ -246,7 +293,7 @@ impl Arch for crate::Arch {
 
         // Set up PMP attr registers so that all PMP configs can reference them.
         #[cfg(feature = "user_space")]
-        crate::protection::init();
+        crate::protection_init();
 
         crate::timer::systick_early_init();
 
@@ -279,12 +326,16 @@ impl Arch for crate::Arch {
 }
 
 impl kernel::scheduler::thread::ThreadState for ArchThreadState {
-    type MemoryConfig = crate::protection::MemoryConfig;
+    type MemoryConfig = crate::MemoryConfig;
 
     const NEW: Self = Self {
         frame: core::ptr::null_mut(),
         memory_config: core::ptr::null(),
         local: ThreadLocalState::new(),
+        #[cfg(feature = "user_space")]
+        canonical_control: ControlVal(0),
+        #[cfg(feature = "user_space")]
+        canonical_return_address: 0,
     };
 
     unsafe fn initialize_kernel_frame(
@@ -435,12 +486,37 @@ extern "C" fn pendsv_swap_sp(frame: *mut KernelExceptionFrame) -> *mut KernelExc
     unsafe {
         (*active_thread).frame = frame;
 
+        // ARMv7-M fix: Restore canonical CONTROL/EXC_RETURN values to the
+        // ACTIVE thread's frame. The frame we just saved may have corrupted
+        // values if PendSV fired during syscall processing (when SVCall
+        // temporarily elevates privilege by setting CONTROL.nPRIV=0).
+        //
+        // This must be done HERE, to the thread being switched OUT, not to
+        // the thread being switched IN. The corruption is in the interrupted
+        // thread's saved state.
+        //
+        // NOTE: This is ONLY needed on ARMv7-M. On ARMv8-M (Cortex-M33+),
+        // the CONTROL register has additional bits (SFPA, BTI, PAC) that
+        // must be preserved, so we cannot simply overwrite with canonical.
+        #[cfg(all(feature = "user_space", feature = "armv7m"))]
+        {
+            let saved_frame = &mut *(*active_thread).frame;
+            saved_frame.control = (*active_thread).canonical_control;
+            saved_frame.return_address = (*active_thread).canonical_return_address;
+        }
+
         set_active_thread(core::ptr::null_mut());
     }
 
     // Return the arch frame for the current thread
-    let mut sched_state = crate::Arch.get_scheduler().lock(crate::Arch);
+    //
+    // SAFETY: PendSV runs with interrupts disabled (cpsid i via
+    // disable_interrupts attribute), so preemption is already impossible.
+    // Using lock_no_preempt() avoids the preempt_disable_count manipulation
+    // that caused ordering issues between ARMv7-M and ARMv8-M.
+    let mut sched_state = unsafe { crate::Arch.get_scheduler().lock_no_preempt() };
     let new_thread = unsafe { sched_state.get_current_arch_thread_state() };
+    info!("PENDSV: got new_thread");
     log_if::info_if!(
         LOG_CONTEXT_SWITCH,
         "Context switch to thread '{}' ({:#010x})",
@@ -459,6 +535,19 @@ extern "C" fn pendsv_swap_sp(frame: *mut KernelExceptionFrame) -> *mut KernelExc
     drop(sched_state);
 
     unsafe { THREAD_LOCAL_STATE = NonNull::from_ref(&(*new_thread).local) }
+
+    // Debug: dump the kernel exception frame we're about to return to
+    #[cfg(feature = "user_space")]
+    {
+        let frame = unsafe { &*(*new_thread).frame };
+        log_if::info_if!(
+            LOG_CONTEXT_SWITCH,
+            "KernelFrame: psp={:#010x} control={:#010x} ret_addr={:#010x}",
+            frame.psp as u32,
+            frame.control.0 as u32,
+            frame.return_address as u32
+        );
+    }
 
     unsafe { (*new_thread).frame }
 }

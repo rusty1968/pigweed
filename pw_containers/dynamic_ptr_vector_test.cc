@@ -317,4 +317,158 @@ TEST_F(DynamicPtrVectorTest, Take) {
   EXPECT_LT(allocated_after_reset, allocated_before_reset);
 }
 
+TEST_F(DynamicPtrVectorTest, PushBackUniquePtr_SameAllocator) {
+  pw::DynamicPtrVector<Counter> vec(allocator_);
+  auto ptr = allocator_.MakeUnique<Counter>(100);
+  Counter* const raw_ptr = ptr.get();
+
+  vec.push_back(std::move(ptr));
+  EXPECT_EQ(vec.size(), 1u);
+  EXPECT_EQ(vec[0].value, 100);
+
+  EXPECT_EQ(&vec[0], raw_ptr);
+}
+
+TEST_F(DynamicPtrVectorTest, PushBackUniquePtr_DifferentAllocator) {
+  pw::DynamicPtrVector<Counter> vec(allocator_);
+  pw::allocator::test::AllocatorForTest<256> other_allocator;
+  auto ptr = other_allocator.MakeUnique<Counter>(200);
+  Counter* const raw_ptr = ptr.get();
+
+  vec.push_back(std::move(ptr));
+  EXPECT_EQ(vec.size(), 1u);
+  EXPECT_EQ(vec[0].value, 200);
+
+  EXPECT_NE(&vec[0], raw_ptr);
+}
+
+TEST_F(DynamicPtrVectorTest, InsertUniquePtr_SameAllocator) {
+  pw::DynamicPtrVector<Counter> vec(allocator_);
+  vec.emplace_back(1);
+  vec.emplace_back(3);
+
+  auto ptr = allocator_.MakeUnique<Counter>(2);
+  Counter* const raw_ptr = ptr.get();
+
+  auto it = vec.insert(vec.begin() + 1, std::move(ptr));
+  EXPECT_EQ(it->value, 2);
+  EXPECT_EQ(vec[0].value, 1);
+  EXPECT_EQ(vec[1].value, 2);
+  EXPECT_EQ(vec[2].value, 3);
+
+  EXPECT_EQ(&vec[1], raw_ptr);
+}
+
+TEST_F(DynamicPtrVectorTest, InsertUniquePtr_DifferentAllocator) {
+  pw::DynamicPtrVector<Counter> vec(allocator_);
+  vec.emplace_back(1);
+  vec.emplace_back(3);
+
+  pw::allocator::test::AllocatorForTest<256> other_allocator;
+  auto ptr = other_allocator.MakeUnique<Counter>(2);
+  Counter* const raw_ptr = ptr.get();
+
+  auto it = vec.insert(vec.begin() + 1, std::move(ptr));
+  EXPECT_EQ(it->value, 2);
+  EXPECT_EQ(vec[0].value, 1);
+  EXPECT_EQ(vec[1].value, 2);
+  EXPECT_EQ(vec[2].value, 3);
+
+  EXPECT_NE(&vec[1], raw_ptr);
+}
+
+TEST_F(DynamicPtrVectorTest, PushBackUniquePtr_Derived) {
+  struct Base {
+    virtual ~Base() = default;
+    int val = 0;
+  };
+  struct Derived : Base {
+    Derived() { val = 1; }
+  };
+
+  pw::DynamicPtrVector<Base> vec(allocator_);
+  auto ptr = allocator_.MakeUnique<Derived>();
+
+  vec.push_back(std::move(ptr));
+  EXPECT_EQ(vec[0].val, 1);
+}
+
+TEST_F(DynamicPtrVectorTest, SwapVectors) {
+  pw::DynamicPtrVector<Counter> vec1(allocator_);
+  vec1.emplace_back(1);
+  vec1.emplace_back(2);
+
+  pw::DynamicPtrVector<Counter> vec2(allocator_);
+  vec2.emplace_back(3);
+  vec2.emplace_back(4);
+  vec2.emplace_back(5);
+
+  vec1.swap(vec2);
+  EXPECT_EQ(vec1.size(), 3u);
+  EXPECT_EQ(vec1[0].value, 3);
+  EXPECT_EQ(vec1[1].value, 4);
+  EXPECT_EQ(vec1[2].value, 5);
+
+  EXPECT_EQ(vec2.size(), 2u);
+  EXPECT_EQ(vec2[0].value, 1);
+  EXPECT_EQ(vec2[1].value, 2);
+}
+
+TEST_F(DynamicPtrVectorTest, SwapIterators) {
+  pw::DynamicPtrVector<Counter> vec(allocator_);
+  vec.emplace_back(1);
+  vec.emplace_back(2);
+  vec.emplace_back(3);
+
+  vec.swap(vec.begin(), vec.begin() + 2);
+  EXPECT_EQ(vec[0].value, 3);
+  EXPECT_EQ(vec[2].value, 1);
+
+  vec.swap(vec.begin() + 1, vec.begin());
+  EXPECT_EQ(vec[0].value, 2);
+  EXPECT_EQ(vec[1].value, 3);
+  EXPECT_EQ(vec[2].value, 1);
+}
+
+TEST_F(DynamicPtrVectorTest, SwapIndices) {
+  pw::DynamicPtrVector<Counter> vec(allocator_);
+  vec.emplace_back(1);
+  vec.emplace_back(2);
+  vec.emplace_back(3);
+
+  vec.swap(0, 2);
+  EXPECT_EQ(vec[0].value, 3);
+  EXPECT_EQ(vec[1].value, 2);
+  EXPECT_EQ(vec[2].value, 1);
+
+  vec.swap(1, 0);
+  EXPECT_EQ(vec[0].value, 2);
+  EXPECT_EQ(vec[1].value, 3);
+  EXPECT_EQ(vec[2].value, 1);
+}
+
+TEST_F(DynamicPtrVectorTest, SwapWithBackIterator) {
+  pw::DynamicPtrVector<Counter> vec(allocator_);
+  vec.emplace_back(1);
+  vec.emplace_back(2);
+  vec.emplace_back(3);
+
+  vec.swap(vec.begin(), vec.end() - 1);
+  EXPECT_EQ(vec[0].value, 3);
+  EXPECT_EQ(vec[1].value, 2);
+  EXPECT_EQ(vec[2].value, 1);
+}
+
+TEST_F(DynamicPtrVectorTest, SwapWithBackIndex) {
+  pw::DynamicPtrVector<Counter> vec(allocator_);
+  vec.emplace_back(1);
+  vec.emplace_back(2);
+  vec.emplace_back(3);
+
+  vec.swap(1, vec.size() - 1);
+  EXPECT_EQ(vec[0].value, 1);
+  EXPECT_EQ(vec[1].value, 3);
+  EXPECT_EQ(vec[2].value, 2);
+}
+
 }  // namespace

@@ -54,7 +54,99 @@ namespace internal {
 template <typename T>
 class Channel;
 
-class BaseChannelFuture;
+class BaseChannel;
+
+class BaseChannelFuture {
+ public:
+  BaseChannelFuture(const BaseChannelFuture&) = delete;
+  BaseChannelFuture& operator=(const BaseChannelFuture&) = delete;
+
+  // Derived classes call MoveAssignFrom to move rather than use the operator.
+  BaseChannelFuture& operator=(BaseChannelFuture&&) = delete;
+
+  /// True if the future has returned `Ready()`.
+  [[nodiscard]] bool is_complete() const { return core_.is_complete(); }
+
+ protected:
+  // Creates a new future, storing nullptr if `channel` is nullptr or if the
+  // channel is closed.
+  explicit BaseChannelFuture(BaseChannel* channel) PW_LOCKS_EXCLUDED(*channel);
+
+  enum AllowClosed { kAllowClosed };
+
+  // Creates a new future, but does NOT check if the channel is open.
+  BaseChannelFuture(BaseChannel* channel, AllowClosed)
+      PW_LOCKS_EXCLUDED(*channel) {
+    StoreAndAddRefIfNonnull(channel);
+  }
+
+  BaseChannelFuture(BaseChannelFuture&& other)
+      PW_LOCKS_EXCLUDED(*channel_, *other.channel_)
+      : channel_(other.channel_) {
+    MoveFrom(other);
+  }
+
+  BaseChannelFuture& MoveAssignFrom(BaseChannelFuture& other)
+      PW_LOCKS_EXCLUDED(*channel_, *other.channel_);
+
+  // Unlists this future and removes a reference from the channel.
+  void RemoveFromChannel() PW_LOCKS_EXCLUDED(*channel_);
+
+  bool StoreWakerForReceiveIfOpen(Context& cx) PW_UNLOCK_FUNCTION(*channel_);
+
+  void StoreWakerForSend(Context& cx) PW_UNLOCK_FUNCTION(*channel_);
+
+  void StoreWakerForReserveSend(Context& cx) PW_UNLOCK_FUNCTION(*channel_);
+
+  void MarkCompleted() { core_.MarkComplete(); }
+
+  void Complete() PW_UNLOCK_FUNCTION(*channel_);
+
+  BaseChannel* base_channel() PW_LOCK_RETURNED(channel_) { return channel_; }
+
+ private:
+  void StoreAndAddRefIfNonnull(BaseChannel* channel)
+      PW_LOCKS_EXCLUDED(*channel);
+
+  void MoveFrom(BaseChannelFuture& other) PW_LOCKS_EXCLUDED(*other.channel_);
+
+  BaseChannel* channel_;
+  FutureCore core_;
+
+ public:
+  using List = FutureList<&BaseChannelFuture::core_>;
+};
+
+// Adds a Pend function to BaseChannelFuture.
+template <typename Derived, typename T, typename FutureValue>
+class ChannelFuture : public BaseChannelFuture {
+ public:
+  using value_type = FutureValue;
+
+  Poll<value_type> Pend(Context& cx) PW_LOCKS_EXCLUDED(*this->channel()) {
+    Poll<value_type> result = static_cast<Derived&>(*this).DoPend(cx);
+    if (result.IsReady()) {
+      MarkCompleted();
+    }
+    return result;
+  }
+
+ protected:
+  explicit ChannelFuture(Channel<T>* channel) : BaseChannelFuture(channel) {}
+
+  ChannelFuture(Channel<T>* channel, AllowClosed)
+      : BaseChannelFuture(channel, kAllowClosed) {}
+
+  ChannelFuture(ChannelFuture&& other) : BaseChannelFuture(std::move(other)) {}
+
+  Channel<T>* channel() PW_LOCK_RETURNED(this->base_channel()) {
+    return static_cast<Channel<T>*>(base_channel());
+  }
+
+ private:
+  using BaseChannelFuture::base_channel;
+  using BaseChannelFuture::MarkCompleted;
+};
 
 // Internal generic channel type. BaseChannel is not exposed to users. Its
 // public interface is for internal consumption.
@@ -93,13 +185,13 @@ class PW_LOCKABLE("pw::async2::internal::BaseChannel") BaseChannel {
   // Adds a SendFuture or ReserveSendFuture to the list of pending futures.
   void add_send_future(BaseChannelFuture& future)
       PW_EXCLUSIVE_LOCKS_REQUIRED(*this) {
-    containers::PushBackSlow(send_futures_, future);
+    send_futures_.Push(future);
   }
 
   // Adds a ReceiveFuture to the list of pending futures.
   void add_receive_future(BaseChannelFuture& future)
       PW_EXCLUSIVE_LOCKS_REQUIRED(*this) {
-    containers::PushBackSlow(receive_futures_, future);
+    receive_futures_.Push(future);
   }
 
   void DropReservationAndRemoveRef() PW_LOCKS_EXCLUDED(*this);
@@ -147,11 +239,11 @@ class PW_LOCKABLE("pw::async2::internal::BaseChannel") BaseChannel {
   ~BaseChannel();
 
   void WakeOneReceiver() PW_EXCLUSIVE_LOCKS_REQUIRED(*this) {
-    PopAndWakeOneIfAvailable(receive_futures_);
+    receive_futures_.ResolveOneIfAvailable();
   }
 
   void WakeOneSender() PW_EXCLUSIVE_LOCKS_REQUIRED(*this) {
-    PopAndWakeOneIfAvailable(send_futures_);
+    send_futures_.ResolveOneIfAvailable();
   }
 
   uint16_t reservations() const PW_EXCLUSIVE_LOCKS_REQUIRED(*this) {
@@ -159,13 +251,6 @@ class PW_LOCKABLE("pw::async2::internal::BaseChannel") BaseChannel {
   }
 
  private:
-  static void PopAndWakeAll(IntrusiveForwardList<BaseChannelFuture>& futures);
-
-  static void PopAndWakeOneIfAvailable(
-      IntrusiveForwardList<BaseChannelFuture>& futures);
-
-  static void PopAndWakeOne(IntrusiveForwardList<BaseChannelFuture>& futures);
-
   void add_object(uint8_t& counter) PW_EXCLUSIVE_LOCKS_REQUIRED(*this) {
     if (is_open_locked()) {
       PW_ASSERT(CheckedIncrement(counter, 1));
@@ -192,8 +277,8 @@ class PW_LOCKABLE("pw::async2::internal::BaseChannel") BaseChannel {
   // Destroys the channel if it is dynamically allocated.
   virtual void Destroy() {}
 
-  IntrusiveForwardList<BaseChannelFuture> send_futures_ PW_GUARDED_BY(*this);
-  IntrusiveForwardList<BaseChannelFuture> receive_futures_ PW_GUARDED_BY(*this);
+  BaseChannelFuture::List send_futures_ PW_GUARDED_BY(*this);
+  BaseChannelFuture::List receive_futures_ PW_GUARDED_BY(*this);
 
   uint16_t reservations_ PW_GUARDED_BY(*this) = 0;
   bool closed_ PW_GUARDED_BY(*this) = false;
@@ -212,105 +297,6 @@ class PW_LOCKABLE("pw::async2::internal::BaseChannel") BaseChannel {
   uint8_t receiver_count_ PW_GUARDED_BY(*this) = 0;
   uint8_t handle_count_ PW_GUARDED_BY(*this) = 0;
   uint16_t ref_count_ PW_GUARDED_BY(*this) = 0;
-};
-
-class BaseChannelFuture : public IntrusiveForwardList<BaseChannelFuture>::Item {
- public:
-  BaseChannelFuture(const BaseChannelFuture&) = delete;
-  BaseChannelFuture& operator=(const BaseChannelFuture&) = delete;
-
-  // Derived classes call MoveAssignFrom to move rather than use the operator.
-  BaseChannelFuture& operator=(BaseChannelFuture&&) = delete;
-
-  /// True if the future has returned `Ready()`.
-  [[nodiscard]] bool is_complete() const { return completed_; }
-
-  // Internal API for the channel to wake the future.
-  void Wake() { waker_.Wake(); }
-
- protected:
-  // Creates a new future, storing nullptr if `channel` is nullptr or if the
-  // channel is closed.
-  explicit BaseChannelFuture(BaseChannel* channel) PW_LOCKS_EXCLUDED(*channel);
-
-  enum AllowClosed { kAllowClosed };
-
-  // Creates a new future, but does NOT check if the channel is open.
-  BaseChannelFuture(BaseChannel* channel, AllowClosed)
-      PW_LOCKS_EXCLUDED(*channel) {
-    StoreAndAddRefIfNonnull(channel);
-  }
-
-  BaseChannelFuture(BaseChannelFuture&& other)
-      PW_LOCKS_EXCLUDED(*channel_, *other.channel_)
-      : channel_(other.channel_) {
-    MoveFrom(other);
-  }
-
-  BaseChannelFuture& MoveAssignFrom(BaseChannelFuture& other)
-      PW_LOCKS_EXCLUDED(*channel_, *other.channel_);
-
-  // Unlists this future and removes a reference from the channel.
-  void RemoveFromChannel() PW_LOCKS_EXCLUDED(*channel_);
-
-  bool StoreWakerForReceiveIfOpen(Context& cx) PW_UNLOCK_FUNCTION(*channel_);
-
-  void StoreWakerForSend(Context& cx) PW_UNLOCK_FUNCTION(*channel_);
-
-  void StoreWakerForReserveSend(Context& cx) PW_UNLOCK_FUNCTION(*channel_);
-
-  void MarkCompleted() { completed_ = true; }
-
-  void Complete() PW_UNLOCK_FUNCTION(*channel_) {
-    channel_->RemoveRefAndDestroyIfUnreferenced();
-    channel_ = nullptr;
-  }
-
-  BaseChannel* base_channel() PW_LOCK_RETURNED(channel_) { return channel_; }
-
- private:
-  void StoreAndAddRefIfNonnull(BaseChannel* channel)
-      PW_LOCKS_EXCLUDED(*channel);
-
-  void MoveFrom(BaseChannelFuture& other) PW_LOCKS_EXCLUDED(*other.channel_);
-
-  BaseChannel* channel_;
-  Waker waker_;
-
-  bool completed_ = false;
-};
-
-// Adds Pend function and is_complete flag to BaseChannelFuture.
-template <typename Derived, typename T, typename FutureValue>
-class ChannelFuture : public BaseChannelFuture {
- public:
-  using value_type = FutureValue;
-
-  Poll<value_type> Pend(Context& cx) PW_LOCKS_EXCLUDED(*this->channel()) {
-    PW_ASSERT(!is_complete());
-    Poll<value_type> result = static_cast<Derived&>(*this).DoPend(cx);
-    if (result.IsReady()) {
-      MarkCompleted();
-    }
-    return result;
-  }
-
- protected:
-  explicit ChannelFuture(Channel<T>* channel) : BaseChannelFuture(channel) {}
-
-  ChannelFuture(Channel<T>* channel, AllowClosed)
-      : BaseChannelFuture(channel, kAllowClosed) {}
-
-  ChannelFuture(ChannelFuture&& other) : BaseChannelFuture(std::move(other)) {}
-
-  Channel<T>* channel() PW_LOCK_RETURNED(this->base_channel()) {
-    return static_cast<Channel<T>*>(base_channel());
-  }
-
- private:
-  using BaseChannelFuture::base_channel;
-  using BaseChannelFuture::MarkCompleted;
-  using BaseChannelFuture::Wake;
 };
 
 // Like BaseChannel, Channel is an internal class that is not exposed to users.
@@ -804,6 +790,7 @@ class [[nodiscard]] ReceiveFuture final
 
   PollOptional<T> DoPend(Context& cx) PW_LOCKS_EXCLUDED(*this->channel()) {
     if (this->channel() == nullptr) {
+      PW_ASSERT(!this->is_complete());
       return Ready<std::optional<T>>(std::nullopt);
     }
 
@@ -1006,6 +993,7 @@ class [[nodiscard]] SendFuture final
 
   Poll<bool> DoPend(Context& cx) PW_LOCKS_EXCLUDED(*this->channel()) {
     if (this->channel() == nullptr) {
+      PW_ASSERT(!this->is_complete());
       return Ready(false);
     }
 
@@ -1117,6 +1105,7 @@ class [[nodiscard]] ReserveSendFuture final
   PollOptional<SendReservation<T>> DoPend(Context& cx)
       PW_LOCKS_EXCLUDED(*this->channel()) {
     if (this->channel() == nullptr) {
+      PW_ASSERT(!this->is_complete());
       return Ready<std::optional<SendReservation<T>>>(std::nullopt);
     }
 
@@ -1532,11 +1521,9 @@ std::tuple<SpscChannelHandle<T>, Sender<T>, Receiver<T>> CreateSpscChannel(
 
 namespace internal {
 
-inline void BaseChannel::PopAndWakeOne(
-    IntrusiveForwardList<BaseChannelFuture>& futures) {
-  BaseChannelFuture& future = futures.front();
-  futures.pop_front();
-  future.Wake();
+inline void BaseChannelFuture::Complete() PW_UNLOCK_FUNCTION(*channel_) {
+  channel_->RemoveRefAndDestroyIfUnreferenced();
+  channel_ = nullptr;
 }
 
 }  // namespace internal

@@ -47,6 +47,8 @@ class ValueFuture {
  public:
   using value_type = T;
 
+  constexpr ValueFuture() = default;
+
   ValueFuture(ValueFuture&& other) noexcept
       PW_LOCKS_EXCLUDED(internal::ValueProviderLock()) {
     *this = std::move(other);
@@ -83,6 +85,11 @@ class ValueFuture {
     // A global lock is simpler and more efficient in practice.
     std::lock_guard lock(internal::ValueProviderLock());
     return core_.DoPend<ValueFuture<T>>(*this, cx);
+  }
+
+  [[nodiscard]] bool is_pendable() const {
+    std::lock_guard lock(internal::ValueProviderLock());
+    return core_.is_pendable();
   }
 
   [[nodiscard]] bool is_complete() const {
@@ -133,6 +140,8 @@ class ValueFuture<void> {
  public:
   using value_type = ReadyType;
 
+  constexpr ValueFuture() = default;
+
   ValueFuture(ValueFuture&& other) = default;
 
   ValueFuture& operator=(ValueFuture&& other) = default;
@@ -147,6 +156,7 @@ class ValueFuture<void> {
     return core_.DoPend<ValueFuture<void>>(*this, cx);
   }
 
+  [[nodiscard]] bool is_pendable() const { return core_.is_pendable(); }
   [[nodiscard]] bool is_complete() const { return core_.is_complete(); }
 
   static ValueFuture Resolved() {
@@ -246,7 +256,7 @@ class ValueProvider {
     ValueFuture<T> future(FutureCore::kPending);
     {
       std::lock_guard lock(internal::ValueProviderLock());
-      list_.PushRequireEmpty(future.core_);
+      list_.PushRequireEmpty(future);
     }
     return future;
   }

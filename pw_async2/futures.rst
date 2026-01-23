@@ -20,17 +20,32 @@ Futures operate using the
 ``pw_async2`` is built. This model is summarized below, but it is recommended to
 read the full description for important background knowledge.
 
-A ``Future<T>`` exposes two member functions:
 
-- ``Poll<T> Pend(Context& cx)``: Drives the asynchronous operation, returning
-  its result on completion. After returning ``Ready``, the future cannot be
-  polled again.
+Future API
+==========
+Futures use a standard API. There is no `Future` class; futures are unique types
+with a common interface, but no shared base. In C++20 and later,
+``pw::async2::Future`` is a C++ concept that describes the future interface.
 
+A ``Future<T>`` exposes the following API:
+
+- ``value_type``: Type alias for the value produced by the future.
+- ``Poll<value_type> Pend(Context& cx)``: Calling ``Pend`` advances the
+  asynchronous operation until no further progress is possible. Returns
+  :cc:`Ready <pw::async2::Ready>` if the operation completes. Otherwise, uses
+  the provided :cc:`Context <pw::async2::Context>` to store a waker and returns
+  :cc:`Pending <pw::async2::Pending>`. The waker wakes the task when ``Pend``
+  should be called again.
 - ``bool is_complete()``: Returns whether the future has already completed and
-  had its result consumed. Can be called after the future returns ``Ready``.
+  had its result consumed.
 
-The base ``Future<T>`` class is an abstract interface. Specific asynchronous
-operations return various concrete future types.
+Futures are single-use and track their completion status. It is an error
+to poll a future after it has already completed.
+
+``pw_async2`` provides a ``pw::async2::Future`` `concept
+<http://go/cppref/cpp/language/constraints.html>`_ that future implementations
+must satisfy. Futures do not share a common base class, but may use common
+helpers such as :cc:`FutureCore <pw::async2::FutureCore>`.
 
 Ownership and lifetime
 ======================
@@ -44,7 +59,8 @@ Polling
 =======
 Futures are lazy and do nothing on their own. The task owning a future must poll
 it to drive it to completion. Calling a future's ``Pend`` function advances its
-operation and returns a :cc:`Poll` containing one of two values:
+operation and returns a :cc:`Poll <pw::async2::Poll>` containing one of two
+values:
 
 * ``Pending()``: The asynchronous operation has not yet finished. The value is
   not available. The task polling the future is be scheduled to wake when the
@@ -164,52 +180,62 @@ function cleanly. Additionally, returning a ``Future`` directly is essential to
 be able to work with coroutines: ``co_await`` can be used directly and will
 resolve to a ``Result<T>``.
 
-Resolving futures
------------------
-After you vend a future from an asynchronous operation, you need a way to track
-and resolve it once the operation has completed. This is the role of providers.
-
-Initially, all leaf futures in Pigweed are listable, allowing them to be stored
-in one of the following providers:
-
-- A :cc:`ListFutureProvider` allows multiple concurrent tasks to wait on an
-  operation. The provider maintains a FIFO list of futures. When the operation
-  completes, you can pop one (or more) futures from the list and resolve them.
-
-- A :cc:`SingleFutureProvider` only allows one task waiting on it at a time. It
-  asserts if you vend a second future. Once the operation is complete, the
-  future can be taken out and resolved.
-
-Listable futures take their provider as a constructor argument and automatically
-manage their presence in the list.
-
 .. _module-pw_async2-futures-implementing:
 
 ---------------------
 Implementing a future
 ---------------------
-``pw_async2`` provides a suite of common futures like ``ValueFuture`` for
-common asynchronous patterns. However, you may want to implement a custom leaf
-future if your operation has complex logic where ``Pend()`` would benefit from
-reaching deeper into the underlying system, e.g. waiting for a hardware
-interrupt.
+``pw_async2`` provides futures like ``ValueFuture`` for common asynchronous
+patterns. However, you may want to implement a custom leaf future if your
+operation has complex logic where ``Pend()`` would benefit from reaching deeper
+into the underlying system, e.g. waiting for a hardware interrupt.
 
-The primary tool for this is the :cc:`ListableFutureWithWaker` base class.
+:cc:`FutureCore <pw::async2::FutureCore>` is the primary tool for creating
+futures.
 
-ListableFutureWithWaker
-=======================
+FutureCore
+==========
 This class provides the essential machinery for most custom leaf futures:
 
-- It stores the :cc:`Waker` of the task that polls it.
-- It manages its membership in an intrusive list, allowing it to be tracked
-  by a "provider".
+- It stores the :cc:`Waker <pw::async2::Waker>` of the task that polls it.
+- It manages its membership in an intrusive list of futures.
 - It tracks completion internally.
+
+Future implementations typically have a :cc:`FutureCore
+<pw::async2::FutureCore>` member.
+
+FutureList
+----------
+After you vend a future from an asynchronous operation, you need a way to track
+and resolve it once the operation has completed. :cc:`FutureCore
+<pw::async2::FutureCore>`\s can be stored in a :cc:`FutureList
+<pw::async2::FutureList>`, which wraps an :cc:`pw::IntrusiveForwardList`.
+
+:cc:`FutureList <pw::async2::FutureList>` allows multiple concurrent tasks to
+wait on an operation. Pending futures are pushed to the list. When an operation
+completes, futures are popped from the list and resolved.
+
+:cc:`FutureList <pw::async2::FutureList>` stores its futures as a linked list of
+:cc:`FutureCore <pw::async2::FutureCore>`\s in its :cc:`BaseFutureList
+<pw::async2::BaseFutureList>` base. This maximizes code reuse between different
+future implementations.
+
+A :cc:`FutureList <pw::async2::FutureList>` is declared with a pointer to the
+future implementation's :cc:`FutureCore <pw::async2::FutureCore>` member:
+``FutureList<&FutureType::future_core_>``. For example:
+
+.. literalinclude:: examples/custom_future.cc
+   :language: cpp
+   :linenos:
+   :start-after: // DOCSTAG: [pw_async2-examples-future-list]
+   :end-before: // DOCSTAG: [pw_async2-examples-future-list]
 
 Waking mechanism
 ================
-When a task polls a future and it returns ``Pending``, the future must store
-the task's :cc:`Waker` from the provided :cc:`Context`. This is handled
-automatically by :cc:`ListableFutureWithWaker`.
+When a task polls a future and it returns ``Pending``, the future must store the
+task's :cc:`Waker <pw::async2::Waker>` from the provided :cc:`Context
+<pw::async2::Context>`. This is handled automatically by
+:cc:`FutureCore::DoPend <pw::async2::FutureCore::DoPend>`.
 
 On the other side of the asynchronous operation (e.g., in an interrupt handler),
 when the operation completes, the provider is used to retrieve the future, and
