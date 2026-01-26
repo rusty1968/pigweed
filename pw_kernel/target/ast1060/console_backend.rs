@@ -51,29 +51,7 @@ pub unsafe fn console_backend_init() {
 
     // Use steal() as recommended for aspeed-rust to avoid singleton check issues
     let peripherals = unsafe { Peripherals::steal() };
-    
-    // Config in aspeed-rust differs slightly:
-    // pub struct Config {
-    //     pub baud_rate: u32,
-    //     pub word_length: u8, // Note: u8, not enum
-    //     pub parity: Parity,
-    //     pub stop_bits: StopBits,
-    //     pub clock: u32,
-    // }
-    // And WordLength enum exists but config takes u8.
-    // Wait, let's check uart.rs again.
-    // pub struct Config { ... pub word_length: u8 ... }
-    // pub enum WordLength { Five, Six, Seven, Eight }
-    // And uart.rs impl: w.cls().bits(config.word_length);
-    // where cls() expects 2 bits.
-    // Wait, WordLength enum values are implicitly 0, 1, 2, 3?
-    // In uart.rs:
-    // pub enum WordLength { Five, Six, Seven, Eight }
-    // If it's a field-less enum, it starts at 0.
-    // 0 -> 5 bits, 1 -> 6 bits, 2 -> 7 bits, 3 -> 8 bits.
-    // So if config.word_length is u8, I should pass 3 for 8 bits.
-    // Or I can use WordLength::Eight as u8 if it implements Copy/Clone.
-    
+
     let config = Config {
         baud_rate: 115200,
         word_length: 3, // 3 means 8 bits (00=5, 01=6, 10=7, 11=8)
@@ -81,14 +59,14 @@ pub unsafe fn console_backend_init() {
         stop_bits: StopBits::One,
         clock: 24_000_000, // Assuming 24MHz clock
     };
-    
+
     #[allow(static_mut_refs)]
     let delay = unsafe { &mut DELAY };
     let controller = UartController::new(peripherals.uart, delay);
     unsafe {
         controller.init(&config);
     }
-    
+
     unsafe {
         let p = core::ptr::addr_of_mut!(UART_CONTROLLER);
         core::ptr::write(p as *mut UartController<'static>, controller);
@@ -104,7 +82,7 @@ pub fn console_backend_write_all(buf: &[u8]) -> Result<()> {
 
     // Safety: logical singlton access pattern guarded by UART_INITIALIZED.
     // In a real multi-threaded kernel we'd need a spinlock here.
-    let controller = unsafe { 
+    let controller = unsafe {
         &mut *(core::ptr::addr_of_mut!(UART_CONTROLLER) as *mut UartController<'static>)
     };
 
