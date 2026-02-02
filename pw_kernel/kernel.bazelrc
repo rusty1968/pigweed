@@ -115,6 +115,7 @@ test:k_qemu_ast1030 --run_under="//pw_kernel/tooling:qemu \
 # =======================================
 common:k_qemu_ast1060 --config=k_common
 common:k_qemu_ast1060 --platforms=//pw_kernel/target/ast1060:ast1060
+common:k_qemu_ast1060 --@rules_rust//rust/settings:extra_rustc_flags=--cfg=pw_log_level=\"info\"
 run:k_qemu_ast1060 --run_under="//pw_kernel/tooling:qemu \
   --cpu cortex-m4 \
   --machine ast1030-evb \

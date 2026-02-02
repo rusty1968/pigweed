@@ -314,7 +314,7 @@ impl MemoryConfig {
                 .with_privdefena(true),
         );
 
-        pw_log::info!(
+        pw_log::debug!(
             "Programming {} MPU regions (PMSAv7)",
             self.mpu_regions.len() as usize
         );

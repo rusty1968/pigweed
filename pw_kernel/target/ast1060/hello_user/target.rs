@@ -21,7 +21,7 @@ use {console_backend as _, entry as _};
 pub struct Target {}
 
 impl TargetInterface for Target {
-    const NAME: &'static str = "AST1060 User IPC";
+    const NAME: &'static str = "AST1060 Hello User Mode";
 
     fn main() -> ! {
         codegen::start();

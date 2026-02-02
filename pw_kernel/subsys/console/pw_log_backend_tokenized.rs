@@ -21,6 +21,28 @@ pub mod __private {
     pub use pw_tokenizer::{MessageWriter, tokenize_core_fmt_to_writer, tokenize_printf_to_writer};
     pub use tokenized_writer::Base64TokenizedMessageWriter;
 
+    pub use pw_log_backend_api::LogLevel;
+
+    pub const fn log_enabled(level: LogLevel) -> bool {
+        let level_val = level as u8;
+        let cutoff = if cfg!(pw_log_level = "debug") {
+            1
+        } else if cfg!(pw_log_level = "info") {
+            2
+        } else if cfg!(pw_log_level = "warn") {
+            3
+        } else if cfg!(pw_log_level = "error") {
+            4
+        } else if cfg!(pw_log_level = "critical") {
+            5
+        } else if cfg!(pw_log_level = "fatal") {
+            7
+        } else {
+            1 // Default to Debug
+        };
+        level_val >= cutoff
+    }
+
     pub fn write(buffer: &[u8]) -> Result<()> {
         let mut console = console::Console::new();
         console.write_all(buffer)
@@ -61,21 +83,25 @@ pub mod __private {
 #[macro_export]
 macro_rules! pw_log_backend {
   ($log_level:expr, $format_string:literal $(, $args:expr)* $(,)?) => {{
-    let _ = $crate::__private::tokenize_core_fmt_to_writer!(
-      $crate::__private::TokenizedWriter,
-      "[{}] " PW_FMT_CONCAT $format_string,
-      $crate::__private::log_level_tag($log_level) as &str,
-      $($args),*);
+    if $crate::__private::log_enabled($log_level) {
+      let _ = $crate::__private::tokenize_core_fmt_to_writer!(
+        $crate::__private::TokenizedWriter,
+        "[{}] " PW_FMT_CONCAT $format_string,
+        $crate::__private::log_level_tag($log_level) as &str,
+        $($args),*);
+    }
   }};
 }
 
 #[macro_export]
 macro_rules! pw_logf_backend {
   ($log_level:expr, $format_string:literal $(, $args:expr)* $(,)?) => {{
-    let _ = $crate::__private::tokenize_printf_to_writer!(
-      $crate::__private::TokenizedWriter,
-      "[%s] " PW_FMT_CONCAT $format_string,
-      $crate::__private::log_level_tag($log_level),
-      $($args),*);
+    if $crate::__private::log_enabled($log_level) {
+      let _ = $crate::__private::tokenize_printf_to_writer!(
+        $crate::__private::TokenizedWriter,
+        "[%s] " PW_FMT_CONCAT $format_string,
+        $crate::__private::log_level_tag($log_level),
+        $($args),*);
+    }
   }};
 }
