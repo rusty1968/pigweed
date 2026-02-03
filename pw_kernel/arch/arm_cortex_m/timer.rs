@@ -66,7 +66,11 @@ pub fn systick_early_init() {
 
     let mut csr = Regs::get().systick.csr;
     // disable counter and interrupts
-    let mut csr_val = csr.read().with_enable(false).with_tickint(false);
+    let mut csr_val = csr
+        .read()
+        .with_enable(false)
+        .with_tickint(false)
+        .with_clksource(crate::regs::systick::CsrClkSource::PE);
     csr.write(csr_val);
 
     // clear current value
@@ -82,7 +86,11 @@ pub fn systick_early_init() {
     // enable counter and interrupts
     // Note: We only enable the counter here. Interrupts are enabled in
     // systick_init() to prevent early ticks before the scheduler is ready.
-    csr_val = csr.read().with_enable(true).with_tickint(false);
+    csr_val = csr
+        .read()
+        .with_enable(true)
+        .with_tickint(false)
+        .with_clksource(crate::regs::systick::CsrClkSource::PE);
     csr.write(csr_val);
 }
 
@@ -94,7 +102,8 @@ pub fn systick_init() {
         .csr
         .read()
         .with_enable(true)
-        .with_tickint(true);
+        .with_tickint(true)
+        .with_clksource(crate::regs::systick::CsrClkSource::PE);
     systick_regs.csr.write(csr_val);
 
     let ticks_per_10ms = systick_regs.calib.read().tenms();

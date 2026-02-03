@@ -223,7 +223,10 @@ crate = use_extension("@rules_rust//crate_universe:extension.bzl", "crate")
 crate.from_cargo(
     name = "crates_no_std",
     cargo_lockfile = "//third_party/crates_io/crates_no_std:Cargo.lock",
-    manifests = ["//third_party/crates_io/crates_no_std:Cargo.toml"],
+    manifests = [
+        "//third_party/crates_io/crates_no_std:Cargo.toml",
+
+    ],
     # crate_universe's defaults do not include some embedded triples so the
     # triples are listed explicitly.
     supported_platform_triples = [
