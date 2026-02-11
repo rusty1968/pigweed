@@ -43,7 +43,7 @@ def _target_linker_script_impl(ctx):
 
     linker_input = cc_common.create_linker_input(
         owner = ctx.label,
-        user_link_flags = ["-T", output.path],
+        user_link_flags = ["-T", output.path, "-nostartfiles"],
         additional_inputs = depset(direct = [output]),
     )
     linking_context = cc_common.create_linking_context(

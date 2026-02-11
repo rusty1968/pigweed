@@ -132,6 +132,7 @@ cc_args(
     actions = ["@rules_cc//cc/toolchains/actions:link_actions"],
     args = [
         "-Wl,--gc-sections",
+        "-nostartfiles",
         "-specs=nano.specs",
         "-specs=nosys.specs",
         "-lstdc++",
