@@ -24,10 +24,15 @@ rust_library(
         "features.rs",
         "lib.rs",
         "nvic.rs",
-        "protection.rs",
+        "protection_v7.rs",
+        "protection_v8.rs",
         "regs.rs",
-        "regs/mpu.rs",
-        "regs/msr.rs",
+        "regs/mpu/mod.rs",
+        "regs/mpu/mpu_v7.rs",
+        "regs/mpu/mpu_v8.rs",
+        "regs/msr/mod.rs",
+        "regs/msr/msr_v7.rs",
+        "regs/msr/msr_v8.rs",
         "regs/nvic.rs",
         "regs/scb.rs",
         "regs/systick.rs",
@@ -36,7 +41,11 @@ rust_library(
         "threads.rs",
         "timer.rs",
     ],
-    crate_features = ["user_space"],
+    crate_features = ["user_space"] + select({
+        "@platforms//cpu:armv7-m": ["armv7m"],
+        "@platforms//cpu:armv8-m": ["armv8m"],
+        "//conditions:default": [],
+    }),
     edition = "2024",
     proc_macro_deps = [
         "//pw_kernel/macros:arm_cortex_m_macro",
@@ -45,6 +54,7 @@ rust_library(
     rustc_flags = KERNEL_TEST_RUSTC_FLAGS,
     tags = ["kernel"],
     target_compatible_with = select({
+        "@platforms//cpu:armv7-m": [],
         "@platforms//cpu:armv8-m": [],
         "//conditions:default": ["@platforms//:incompatible"],
     }),
@@ -74,6 +84,8 @@ rust_doc(
         "--document-private-items",
         "--cfg=feature=\"user_space\"",
         "--cfg=feature=\"arch_arm_cortex_m\"",
+        # Document with ARMv8-M by default
+        "--cfg=feature=\"armv8m\"",
     ],
     tags = ["kernel"],
 )

@@ -32,7 +32,7 @@ use crate::exceptions::{
     ExcReturn, ExcReturnFrameType, ExcReturnMode, ExcReturnRegisterStacking, ExcReturnStack,
     ExceptionFrame, KernelExceptionFrame, RetPsrVal, exception,
 };
-use crate::protection::MemoryConfig;
+use crate::protection_impl::MemoryConfig;
 use crate::regs::Regs;
 use crate::regs::msr::{ControlVal, Spsel};
 use crate::spinlock::BareSpinLock;
@@ -254,7 +254,7 @@ impl Arch for crate::Arch {
 
         // Set up PMP attr registers so that all PMP configs can reference them.
         #[cfg(feature = "user_space")]
-        crate::protection::init();
+        crate::protection_impl::init();
 
         crate::timer::systick_early_init();
 
@@ -287,7 +287,7 @@ impl Arch for crate::Arch {
 }
 
 impl kernel::scheduler::thread::ThreadState for ArchThreadState {
-    type MemoryConfig = crate::protection::MemoryConfig;
+    type MemoryConfig = crate::protection_impl::MemoryConfig;
 
     const NEW: Self = Self {
         frame: core::ptr::null_mut(),
