@@ -79,6 +79,18 @@ impl<K: Kernel> KernelObject<K> for ChannelHandlerObject<K> {
         transaction.initiator.base.signal(kernel, Signals::READABLE);
         Ok(())
     }
+
+    fn raise_peer_user_signal(&self, kernel: K) -> Result<()> {
+        // Handler raises USER signal on the initiator.
+        // We use raise() to OR the USER signal without disturbing other signals.
+        let active_transaction = self.active_transaction.lock();
+        let Some(ref transaction) = *active_transaction else {
+            // No active transaction means we don't know who the initiator is.
+            return Err(Error::FailedPrecondition);
+        };
+        transaction.initiator.base.raise(kernel, Signals::USER);
+        Ok(())
+    }
 }
 
 pub struct ChannelInitiatorObject<K: Kernel> {
@@ -140,7 +152,9 @@ impl<K: Kernel> KernelObject<K> for ChannelInitiatorObject<K> {
         self.base.state.lock(kernel).active_signals -=
             Signals::READABLE | Signals::WRITEABLE | Signals::ERROR;
 
-        self.handler.base.signal(kernel, Signals::READABLE);
+        // Use raise() instead of signal() to preserve any USER signal that
+        // may have been raised on the handler before the transaction.
+        self.handler.base.raise(kernel, Signals::READABLE);
 
         self.object_wait(kernel, Signals::READABLE | Signals::ERROR, deadline)?;
 
@@ -159,5 +173,13 @@ impl<K: Kernel> KernelObject<K> for ChannelInitiatorObject<K> {
         *active_transaction = None;
 
         Ok(recv_bytes)
+    }
+
+    fn raise_peer_user_signal(&self, kernel: K) -> Result<()> {
+        // Initiator raises USER signal on the handler.
+        // We use raise() to OR the USER signal without disturbing other signals
+        // (e.g., READABLE from a pending transaction).
+        self.handler.base.raise(kernel, Signals::USER);
+        Ok(())
     }
 }

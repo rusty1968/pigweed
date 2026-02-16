@@ -202,6 +202,19 @@ fn handle_interrupt_ack<'a, K: Kernel>(kernel: K, mut args: K::SyscallArgs<'a>) 
     ret.map(|_| 0)
 }
 
+fn handle_raise_peer_user_signal<'a, K: Kernel>(
+    kernel: K,
+    mut args: K::SyscallArgs<'a>,
+) -> Result<u64> {
+    log_if::debug_if!(SYSCALL_DEBUG, "syscall: handling raise_peer_user_signal");
+    let handle = args.next_u32()?;
+
+    let object = lookup_handle(kernel, handle)?;
+    let ret = object.raise_peer_user_signal(kernel);
+    log_if::debug_if!(SYSCALL_DEBUG, "syscall: raise_peer_user_signal complete");
+    ret.map(|_| 0)
+}
+
 // TODO: Remove this syscall when logging is added.
 fn handle_debug_putc<'a, K: Kernel>(kernel: K, mut args: K::SyscallArgs<'a>) -> Result<u64> {
     log_if::debug_if!(SYSCALL_DEBUG, "syscall: handling debug_putc");
@@ -266,6 +279,7 @@ pub fn handle_syscall<'a, K: Kernel>(
             SysCallId::ChannelRead => handle_channel_read(kernel, args).into(),
             SysCallId::ChannelRespond => handle_channel_respond(kernel, args).into(),
             SysCallId::InterruptAck => handle_interrupt_ack(kernel, args).into(),
+            SysCallId::RaisePeerUserSignal => handle_raise_peer_user_signal(kernel, args).into(),
             SysCallId::DebugPutc => handle_debug_putc(kernel, args).into(),
             SysCallId::DebugShutdown => handle_debug_shutdown(kernel, args).into(),
             SysCallId::DebugLog => handle_debug_log(kernel, args).into(),
