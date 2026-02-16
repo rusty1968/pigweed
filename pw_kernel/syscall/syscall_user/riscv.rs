@@ -15,7 +15,7 @@
 use core::arch::naked_asm;
 
 use pw_status::Result;
-use syscall_defs::{Signals, SysCallId, SysCallInterface, SysCallReturnValue, WaitReturn};
+use syscall_defs::{InterruptControl, InterruptStatus, Signals, SysCallId, SysCallInterface, SysCallReturnValue, WaitReturn};
 
 pub struct SysCall {}
 
@@ -51,6 +51,8 @@ syscall_veneer!(ChannelRead, channel_read(
 ));
 syscall_veneer!(ChannelRespond, channel_respond(object_handle: u32, buffer: *const u8, buffer_len: usize));
 syscall_veneer!(InterruptAck, interrupt_ack(object_handle: u32, signal_mask: Signals));
+syscall_veneer!(InterruptControl, interrupt_control(object_handle: u32, signal_mask: Signals, control: InterruptControl));
+syscall_veneer!(InterruptStatus, interrupt_status(object_handle: u32, signal_mask: Signals));
 syscall_veneer!(DebugPutc, putc(a: u32));
 syscall_veneer!(DebugShutdown, shutdown(a: u32));
 syscall_veneer!(DebugLog, log(buffer: *const u8, buffer_len: usize));
@@ -96,6 +98,22 @@ impl SysCallInterface for SysCall {
     #[inline(always)]
     fn interrupt_ack(handle: u32, signal_mask: Signals) -> Result<()> {
         SysCallReturnValue::from(unsafe { interrupt_ack(handle, signal_mask) }).into()
+    }
+
+    #[inline(always)]
+    fn interrupt_control(
+        handle: u32,
+        signal_mask: Signals,
+        control: InterruptControl,
+    ) -> Result<()> {
+        SysCallReturnValue::from(unsafe { interrupt_control(handle, signal_mask, control) })
+            .into()
+    }
+
+    #[inline(always)]
+    fn interrupt_status(handle: u32, signal_mask: Signals) -> Result<InterruptStatus> {
+        SysCallReturnValue::from(unsafe { interrupt_status(handle, signal_mask) })
+            .to_result_interrupt_status()
     }
 
     #[inline(always)]

@@ -14,6 +14,7 @@
 
 use pw_cast::CastInto;
 use pw_status::{Result, StatusCode};
+pub use syscall_defs::{InterruptControl, InterruptStatus};
 use syscall_defs::SysCallInterface;
 pub use syscall_defs::{Signals, WaitReturn};
 use syscall_user::SysCall;
@@ -65,6 +66,39 @@ pub fn channel_respond(object_handle: u32, buffer: &[u8]) -> Result<()> {
 #[inline(always)]
 pub fn interrupt_ack(object_handle: u32, signal_mask: Signals) -> Result<()> {
     SysCall::interrupt_ack(object_handle, signal_mask)
+}
+
+/// Control interrupt enable/disable and clear pending status.
+///
+/// # Arguments
+/// * `object_handle` - Handle to an InterruptObject
+/// * `signal_mask` - Which interrupt signals to control
+/// * `control` - Control flags (ENABLE, CLEAR_PENDING)
+///
+/// # Returns
+/// * `Ok(())` on success
+/// * `Err(InvalidArgument)` if handle is not an InterruptObject
+#[inline(always)]
+pub fn interrupt_control(
+    object_handle: u32,
+    signal_mask: Signals,
+    control: InterruptControl,
+) -> Result<()> {
+    SysCall::interrupt_control(object_handle, signal_mask, control)
+}
+
+/// Query the status of interrupts.
+///
+/// # Arguments
+/// * `object_handle` - Handle to an InterruptObject
+/// * `signal_mask` - Which interrupt signals to query
+///
+/// # Returns
+/// * `Ok(InterruptStatus)` with ENABLED/PENDING/NOTIFIED flags
+/// * `Err(InvalidArgument)` if handle is not an InterruptObject
+#[inline(always)]
+pub fn interrupt_status(object_handle: u32, signal_mask: Signals) -> Result<InterruptStatus> {
+    SysCall::interrupt_status(object_handle, signal_mask)
 }
 
 #[inline(always)]

@@ -234,6 +234,20 @@ impl From<i64> for SysCallReturnValue {
     }
 }
 
+impl SysCallReturnValue {
+    pub fn to_result_interrupt_status(self) -> Result<InterruptStatus> {
+        let value = self.value[0].cast_signed();
+        if value < 0 {
+            let value = (-value).cast_unsigned();
+            #[allow(clippy::cast_possible_truncation)]
+            Err(unsafe { core::mem::transmute::<u32, Error>(value as u32) })
+        } else {
+            #[allow(clippy::cast_possible_truncation)]
+            Ok(InterruptStatus::from_bits_truncate(value.cast_unsigned() as u32))
+        }
+    }
+}
+
 impl From<Result<u64>> for SysCallReturnValue {
     fn from(value: Result<u64>) -> Self {
         match value {
@@ -297,6 +311,8 @@ pub enum SysCallId {
     ChannelRead = 0x0002,
     ChannelRespond = 0x0003,
     InterruptAck = 0x0004,
+    InterruptControl = 0x0005,
+    InterruptStatus = 0x0006,
 
     // System calls prefixed with 0xF000 are reserved development/debugging use.
     DebugPutc = 0xf000,
@@ -358,6 +374,55 @@ bitflags! {
 }
 
 impl Signals {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self(0)
+    }
+}
+
+/// Control flags for the [`interrupt_control()`] syscall.
+///
+/// Used to enable/disable interrupts and clear pending status.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct InterruptControl(u32);
+
+bitflags! {
+    impl InterruptControl: u32 {
+        /// Enable the interrupt(s) specified by signal_mask.
+        /// If not set, the interrupt(s) will be disabled.
+        const ENABLE = 1 << 0;
+        /// Clear any pending status for the interrupt(s).
+        const CLEAR_PENDING = 1 << 1;
+    }
+}
+
+impl InterruptControl {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self(0)
+    }
+}
+
+/// Status flags returned by the [`interrupt_status()`] syscall.
+///
+/// Indicates the current state of interrupt(s).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct InterruptStatus(u32);
+
+bitflags! {
+    impl InterruptStatus: u32 {
+        /// At least one interrupt in the mask is enabled at hardware level.
+        const ENABLED = 1 << 0;
+        /// At least one interrupt in the mask is pending in hardware.
+        const PENDING = 1 << 1;
+        /// A notification has been posted but not yet consumed via object_wait().
+        const NOTIFIED = 1 << 2;
+    }
+}
+
+impl InterruptStatus {
     #[must_use]
     pub const fn new() -> Self {
         Self(0)
@@ -587,6 +652,16 @@ pub trait SysCallInterface {
     ) -> Result<()>;
 
     fn interrupt_ack(object_handle: u32, signal_mask: Signals) -> Result<()>;
+
+    /// Control interrupt enable/disable and clear pending status.
+    fn interrupt_control(
+        object_handle: u32,
+        signal_mask: Signals,
+        control: InterruptControl,
+    ) -> Result<()>;
+
+    /// Query the status of interrupts.
+    fn interrupt_status(object_handle: u32, signal_mask: Signals) -> Result<InterruptStatus>;
 
     fn debug_putc(a: u32) -> Result<u32>;
     // TODO: Consider adding an feature flagged PowerManager object and move
