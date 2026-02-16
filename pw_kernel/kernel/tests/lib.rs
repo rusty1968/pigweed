@@ -13,5 +13,6 @@
 // the License.
 #![no_std]
 
+mod object_signals;
 mod stack;
 mod sync;
