@@ -137,6 +137,26 @@ impl<K: Kernel> ObjectBaseState<K> {
             waiters: RandomAccessForeignList::new(),
         }
     }
+
+    /// Wake all waiters where any of the requested signals are now active.
+    #[inline(never)]
+    fn notify_satisfied_waiters(&mut self) {
+        let _ = self.waiters.for_each(|waiter| -> Result<()> {
+            if self.active_signals.intersects(waiter.signal_mask) {
+                // Safety: While a waiter is in an object's `waiters` list, that
+                // object has exclusive access to the waiter.  The below
+                // operation is done with the object's spinlock held.
+                unsafe {
+                    waiter.wait_result.set(Ok(WaitReturn {
+                        user_data: 0,
+                        pending_signals: self.active_signals,
+                    }))
+                };
+                waiter.signaler.signal();
+            }
+            Ok(())
+        });
+    }
 }
 
 /// Translates handles to dynamic references to kernel objects.
@@ -208,8 +228,8 @@ impl<K: Kernel> ObjectBase<K> {
     ) -> Result<WaitReturn> {
         let mut state = self.state.lock(kernel);
 
-        // Skip waiting if signals are already pending.
-        if state.active_signals.contains(signal_mask) {
+        // Skip waiting if any of the requested signals are already pending.
+        if state.active_signals.intersects(signal_mask) {
             return Ok(WaitReturn {
                 user_data: 0,
                 pending_signals: state.active_signals,
@@ -260,22 +280,7 @@ impl<K: Kernel> ObjectBase<K> {
     pub fn signal(&self, kernel: K, active_signals: Signals) {
         let mut state = self.state.lock(kernel);
         state.active_signals = active_signals;
-
-        let _ = state.waiters.for_each(|waiter| -> Result<()> {
-            if waiter.signal_mask.contains(active_signals) {
-                // Safety: While a waiter is in an object's `waiters` list, that
-                // object has exclusive access to the waiter.  The below
-                // operation is done with the object's spinlock held.
-                unsafe {
-                    waiter.wait_result.set(Ok(WaitReturn {
-                        user_data: 0,
-                        pending_signals: active_signals,
-                    }))
-                };
-                waiter.signaler.signal();
-            }
-            Ok(())
-        });
+        state.notify_satisfied_waiters();
     }
 
     /// Raise additional signals on this object (OR with existing signals).
@@ -286,21 +291,6 @@ impl<K: Kernel> ObjectBase<K> {
     pub fn raise(&self, kernel: K, signals_to_raise: Signals) {
         let mut state = self.state.lock(kernel);
         state.active_signals |= signals_to_raise;
-
-        let _ = state.waiters.for_each(|waiter| -> Result<()> {
-            if waiter.signal_mask.intersects(signals_to_raise) {
-                // Safety: While a waiter is in an object's `waiters` list, that
-                // object has exclusive access to the waiter.  The below
-                // operation is done with the object's spinlock held.
-                unsafe {
-                    waiter.wait_result.set(Ok(WaitReturn {
-                        user_data: 0,
-                        pending_signals: state.active_signals,
-                    }))
-                };
-                waiter.signaler.signal();
-            }
-            Ok(())
-        });
+        state.notify_satisfied_waiters();
     }
 }

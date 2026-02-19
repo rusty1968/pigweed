@@ -247,4 +247,109 @@ mod tests {
 
         Ok(())
     }
+
+    // =========================================================================
+    // Signal intersects() semantics tests
+    //
+    // These tests verify the correct `intersects` semantics used in waiter
+    // wake logic. A waiter waiting for mask M should wake when the object's
+    // active signals A satisfy: A.intersects(M) (i.e., ANY bit in M is in A).
+    //
+    // The wait_until() docstring says "blocks until any of the signals in
+    // `signal_mask` are active", which is intersects() semantics.
+    //
+    // The original code had reversed operands: M.contains(A). The fix was
+    // to use A.intersects(M) to match the "any of" semantics.
+    // =========================================================================
+
+    /// Verify intersects() semantics: any overlap wakes the waiter.
+    ///
+    /// A waiter for READABLE should wake when READABLE | WRITEABLE is signaled
+    /// because they share the READABLE bit.
+    #[test]
+    fn intersects_any_overlap_satisfies() -> unittest::Result<()> {
+        let active = Signals::READABLE | Signals::WRITEABLE;
+        let mask = Signals::READABLE;
+
+        assert!(
+            active.intersects(mask),
+            "any overlap should satisfy (waiter wakes)"
+        );
+
+        Ok(())
+    }
+
+    /// Verify intersects() semantics: exact match satisfies mask.
+    #[test]
+    fn intersects_exact_match_satisfies() -> unittest::Result<()> {
+        let active = Signals::READABLE;
+        let mask = Signals::READABLE;
+
+        assert!(active.intersects(mask), "exact match should satisfy mask");
+
+        Ok(())
+    }
+
+    /// Verify intersects() semantics: partial overlap DOES satisfy.
+    ///
+    /// A waiter for READABLE | WRITEABLE WILL wake when only READABLE
+    /// is signaled because they intersect.
+    #[test]
+    fn intersects_partial_overlap_satisfies() -> unittest::Result<()> {
+        let active = Signals::READABLE;
+        let mask = Signals::READABLE | Signals::WRITEABLE;
+
+        assert!(
+            active.intersects(mask),
+            "partial overlap should satisfy (any of the signals)"
+        );
+
+        Ok(())
+    }
+
+    /// Verify intersects() semantics: disjoint signals do NOT satisfy mask.
+    #[test]
+    fn intersects_disjoint_does_not_satisfy() -> unittest::Result<()> {
+        let active = Signals::USER;
+        let mask = Signals::READABLE;
+
+        assert!(!active.intersects(mask), "disjoint should NOT satisfy mask");
+
+        Ok(())
+    }
+
+    /// Verify intersects() with multi-signal mask.
+    ///
+    /// A waiter for USER | READABLE wakes when EITHER is present.
+    #[test]
+    fn intersects_any_of_mask_satisfies() -> unittest::Result<()> {
+        let mask = Signals::USER | Signals::READABLE;
+
+        // Only USER is active - should wake!
+        let active_user_only = Signals::USER;
+        assert!(
+            active_user_only.intersects(mask),
+            "any overlap should satisfy"
+        );
+
+        // Only READABLE is active - should wake!
+        let active_readable_only = Signals::READABLE;
+        assert!(
+            active_readable_only.intersects(mask),
+            "any overlap should satisfy"
+        );
+
+        // Both are active - should wake!
+        let active_both = Signals::USER | Signals::READABLE;
+        assert!(active_both.intersects(mask), "full overlap should satisfy");
+
+        // Neither is active - should NOT wake
+        let active_neither = Signals::WRITEABLE;
+        assert!(
+            !active_neither.intersects(mask),
+            "disjoint should NOT satisfy"
+        );
+
+        Ok(())
+    }
 }
