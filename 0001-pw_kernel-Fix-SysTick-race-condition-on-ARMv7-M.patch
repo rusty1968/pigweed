@@ -1,0 +1,58 @@
+From 4d9661339b5490645b695dcc0bf34a493ccb5afb Mon Sep 17 00:00:00 2001
+From: Anthony Rocha <anthony.rocha@amd.com>
+Date: Fri, 6 Feb 2026 12:48:29 -0800
+Subject: [PATCH] pw_kernel: Fix SysTick race condition on ARMv7-M
+
+Defer enabling TICKINT until systick_init() after the scheduler is ready.
+
+On ARMv7-M, PRIMASK resets to 0 leaving interrupts unmasked at boot.
+If TICKINT is enabled in systick_early_init(), SysTick can fire before
+the scheduler is initialized, hitting assertions.
+
+ARMv8-M is not affected because PRIMASK resets to 1, keeping interrupts
+masked until firmware explicitly enables them.
+
+Changes:
+- systick_early_init(): Set ENABLE=1, TICKINT=0 (counter runs for Clock::now())
+- systick_init(): Set ENABLE=1, TICKINT=1 (after scheduler ready)
+
+Bug: b/483090834
+Change-Id: I4959794aa14d134ed712b82ce365d786658ea539
+---
+ pw_kernel/arch/arm_cortex_m/timer.rs | 13 +++++++++++--
+ 1 file changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/pw_kernel/arch/arm_cortex_m/timer.rs b/pw_kernel/arch/arm_cortex_m/timer.rs
+index f1a77d70e..184b1dc4e 100644
+--- a/pw_kernel/arch/arm_cortex_m/timer.rs
++++ b/pw_kernel/arch/arm_cortex_m/timer.rs
+@@ -79,8 +79,10 @@ pub fn systick_early_init() {
+     let rvr_val = rvr.read().with_reload(SYSTICK_RELOAD_VALUE - 1);
+     rvr.write(rvr_val);
+ 
+-    // enable counter and interrupts
+-    csr_val = csr.read().with_enable(true).with_tickint(true);
++    // enable counter only; defer TICKINT until systick_init() after scheduler is ready
++    // to prevent SysTick IRQ from firing before scheduler initialization on ARMv7-M
++    // (ARMv7-M resets PRIMASK to 0, leaving interrupts unmasked at boot)
++    csr_val = csr.read().with_enable(true).with_tickint(false);
+     csr.write(csr_val);
+ }
+ 
+@@ -94,6 +96,13 @@ pub fn systick_init() {
+             KernelConfig::SYS_TICK_HZ as u32
+         );
+     }
++
++    // Now that the scheduler is ready, enable SysTick interrupts.
++    // This prevents a race on ARMv7-M where SysTick could fire before
++    // the scheduler is initialized (PRIMASK resets to 0 on ARMv7-M).
++    let mut csr = systick_regs.csr;
++    let csr_val = csr.read().with_enable(true).with_tickint(true);
++    csr.write(csr_val);
+ }
+ 
+ #[unsafe(no_mangle)]
+-- 
+2.34.1
+
