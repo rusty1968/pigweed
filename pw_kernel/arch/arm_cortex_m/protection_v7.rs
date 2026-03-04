@@ -101,7 +101,7 @@ impl MpuRegion {
                 /* s */ true,
                 /* c */ false,
                 /* b */ true,
-                RasrAp::RoAny,
+                RasrAp::RwAny,
             ),
         };
 
